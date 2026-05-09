@@ -4572,9 +4572,9 @@ class XianyuSliderStealth:
         if submit_button:
             probe_type = 'submit_only'
             submit_text_value = submit_text or ''
-            if submit_selector == 'text=登录' or any(
-                keyword in submit_text_value for keyword in ('进入', '继续', '去登录', '去看看')
-            ):
+            # “text=登录” 在主页面/弹窗遮罩里太宽泛，不能当成快速进入；
+            # 只有按钮自身文案明确包含“快速进入/继续/去登录/去看看”等免密直达语义时才自动点击。
+            if any(keyword in submit_text_value for keyword in ('快速进入', '进入', '继续', '去登录', '去看看')):
                 probe_type = 'direct_enter_like'
             return {
                 'is_login_form': False,
@@ -4655,6 +4655,97 @@ class XianyuSliderStealth:
             f"【{self.pure_user_id}】在 {timeout_seconds:.1f}s 内未探测到登录表单"
         )
         return None, False, None
+
+    def _find_direct_enter_candidate(self, page):
+        """查找普通扫码/免密页上的“快速进入/继续/去登录”等直接进入按钮。"""
+        if not page:
+            return None, None, None
+
+        # 优先检查 iframe。普通登录页的“快速进入”通常在 alibaba-login-box/mini_login iframe 内；
+        # 主页面上的 text=登录 很容易被外层弹窗遮罩拦截，不能优先点击。
+        search_frames = []
+        try:
+            for idx, frame in enumerate(page.frames):
+                if frame == page.main_frame:
+                    continue
+                search_frames.append((f'Frame {idx}', frame))
+        except Exception:
+            pass
+        search_frames.append(('主页面', page))
+
+        candidates = []
+        for frame_label, frame in search_frames:
+            probe_info = self._probe_login_form_state(frame)
+            if probe_info.get('probe_type') != 'direct_enter_like':
+                continue
+            selector = probe_info.get('matched_selector')
+            if not selector:
+                continue
+            element, matched_selector = self._query_first_visible(frame, [selector])
+            if not element:
+                continue
+            matched_text = probe_info.get('matched_text') or ''
+            score = 0
+            if frame_label != '主页面':
+                score += 10
+            if '快速进入' in matched_text:
+                score += 20
+            elif any(keyword in matched_text for keyword in ('进入', '继续', '去登录', '去看看')):
+                score += 8
+            candidates.append((score, frame, element, {
+                'frame_label': frame_label,
+                'matched_selector': matched_selector,
+                'matched_text': matched_text or None,
+            }))
+
+        if not candidates:
+            return None, None, None
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        _, frame, element, probe_info = candidates[0]
+        return frame, element, probe_info
+
+    def _click_direct_enter_if_present(self, page, context=None) -> Tuple[bool, Any]:
+        """普通登录页命中“快速进入”时先自动点击，再探测是否已登录。"""
+        frame, element, probe_info = self._find_direct_enter_candidate(page)
+        if not element:
+            return False, None
+
+        probe_text = probe_info.get('matched_text') if probe_info else None
+        probe_note = f" [{probe_text}]" if probe_text else ""
+        logger.info(
+            f"【{self.pure_user_id}】检测到普通登录页直接进入按钮，自动点击: "
+            f"{probe_info.get('frame_label') if probe_info else '未知位置'} "
+            f"{probe_info.get('matched_selector') if probe_info else ''}{probe_note}"
+        )
+        try:
+            try:
+                element.click(timeout=5000)
+            except TypeError:
+                element.click()
+        except Exception as click_e:
+            logger.warning(f"【{self.pure_user_id}】点击普通登录页直接进入按钮失败，尝试JS点击兜底: {click_e}")
+            try:
+                element.evaluate("el => el.click()")
+            except Exception as js_click_e:
+                logger.warning(f"【{self.pure_user_id}】JS点击普通登录页直接进入按钮也失败: {js_click_e}")
+                return False, None
+        time.sleep(3)
+
+        login_success = False
+        active_page = page
+        try:
+            if context:
+                login_success, active_page, _ = self._probe_context_login_success(context, page)
+            else:
+                login_success = self._check_login_success_by_element(page)
+        except Exception as probe_e:
+            logger.debug(f"【{self.pure_user_id}】点击快速进入后探测登录态失败: {probe_e}")
+
+        if login_success:
+            logger.success(f"【{self.pure_user_id}】✅ 点击快速进入后登录态已确认")
+        else:
+            logger.warning(f"【{self.pure_user_id}】点击快速进入后仍未确认登录态，继续后续验证/扫码流程")
+        return True, active_page or page
 
     def _clear_page_storage_state(self, context=None, fallback_page=None) -> int:
         cleared_pages = 0
@@ -5550,6 +5641,7 @@ class XianyuSliderStealth:
             'face_verify': '人脸验证',
             'sms_verify': '短信验证',
             'qr_verify': '二维码验证',
+            'login_page': '扫码登录',
             'unknown': '身份验证',
         }
         type_name = verification_type_names.get(verification_type, '身份验证')
@@ -9673,8 +9765,8 @@ class XianyuSliderStealth:
                 logger.info(f"【{self.pure_user_id}】检测到验证类型: 二维码验证 (URL特征)")
                 return 'qr_verify'
 
-            # 默认当作未知验证类型
-            logger.info(f"【{self.pure_user_id}】无法确定验证类型，标记为未知")
+            # 顶层业务页经常既不是登录页也不是验证页，这里只是未命中验证特征，降低为 debug 避免误导。
+            logger.debug(f"【{self.pure_user_id}】当前页面未命中具体验证类型，暂标记为 unknown")
             return 'unknown'
 
         except Exception as e:
@@ -10753,6 +10845,20 @@ class XianyuSliderStealth:
                         if has_error:
                             logger.error(f"【{self.pure_user_id}】❌ 登录失败：{error_message}")
                             raise Exception(error_message if error_message else "登录失败，请检查账号密码是否正确")
+
+                        clicked_direct_enter, direct_enter_page = self._click_direct_enter_if_present(monitor_page, context)
+                        if clicked_direct_enter:
+                            login_success, active_page, _ = self._probe_context_login_success(context, direct_enter_page or monitor_page)
+                            if login_success:
+                                logger.success(f"【{self.pure_user_id}】✅ 普通登录页快速进入后登录成功")
+                                return self._finalize_logged_in_cookies(
+                                    context,
+                                    active_page or direct_enter_page or monitor_page,
+                                    scene="普通登录页快速进入后登录成功",
+                                    notification_callback=notification_callback,
+                                    notification_scene=notification_scene,
+                                )
+                            monitor_page = self._select_monitor_page(context, direct_enter_page or monitor_page)
 
                         has_qr, qr_frame = self._detect_qr_code_verification(monitor_page)
                         if has_qr:
