@@ -20247,7 +20247,7 @@ function exportSearchResults() {
 
 
 // 默认版本号（当无法读取 version.txt 时使用）
-const DEFAULT_VERSION = 'v2.0.2';
+const DEFAULT_VERSION = 'v2.0.3';
 
 // 当前本地版本号（动态从 version.txt 读取）
 let LOCAL_VERSION = DEFAULT_VERSION;
@@ -20358,9 +20358,20 @@ function clearIgnoredUpdateVersion(showFeedback = true) {
 
 // 本地版本历史（远程服务禁用时使用）
 const LOCAL_VERSION_HISTORY = {
-    version: 'v2.0.2',
+    version: 'v2.0.3',
     intro: '本系统仅供个人学习研究使用，请勿用于商业用途。如有问题或建议，欢迎反馈。',
     versionHistory: [
+        {
+            version: 'v2.0.3',
+            date: '2026-06-16',
+            updates: [
+                '【新功能】新增待补确认订单补偿能力，发货后平台确认失败的订单会记录待补确认状态并提供补偿入口',
+                '【新功能】在线客服会话新增拉黑入口，便于快速处理异常买家或商品会话',
+                '【优化】会话预览优先显示最新消息，补全客服会话头像昵称，并将客服订单入口跳转到独立订单页',
+                '【修复】停止终态订单重复补确认，避免已完成、已关闭等终态订单被重复处理',
+                '【文档】精简 README 并拆分部署、配置、使用、FAQ 和发版说明文档'
+            ]
+        },
         {
             version: 'v2.0.2',
             date: '2026-06-03',
