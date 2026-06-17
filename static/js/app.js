@@ -11201,6 +11201,7 @@ function getItemPublishFormValues() {
     return {
         accountId: document.getElementById('publishCookieId')?.value || '',
         title: document.getElementById('publishTitle')?.value.trim() || '',
+        category: document.getElementById('publishCategory')?.value.trim() || '',
         description: document.getElementById('publishDescription')?.value.trim() || '',
         currentPrice: document.getElementById('publishCurrentPrice')?.value.trim() || '',
         originalPrice: document.getElementById('publishOriginalPrice')?.value.trim() || '',
@@ -11270,6 +11271,7 @@ function buildItemPublishJsonPayload(values, images) {
         account_id: values.accountId,
         title: values.title,
         description: values.description,
+        category: values.category,
         price: parseOptionalPublishNumber(values.currentPrice, '现价'),
         original_price: parseOptionalPublishNumber(values.originalPrice, '原价'),
         images,
@@ -11437,13 +11439,14 @@ function renderItemPublishMaterials() {
         const image = Array.isArray(material.images) && material.images.length ? material.images[0] : null;
         const imageSrc = getItemPublishImageSrc(image);
         const priceText = material.price !== null && material.price !== undefined ? `¥${material.price}` : '默认价';
+        const categoryText = material.category ? ` · ${material.category}` : '';
         const imageCount = Array.isArray(material.images) ? material.images.length : 0;
         return `
             <div class="item-publish-side-item ${itemPublishLoadedMaterialId === material.id ? 'is-active' : ''}">
                 ${imageSrc ? `<img class="item-publish-side-thumb" src="${escapeHtml(imageSrc)}" alt="素材图">` : '<div class="item-publish-side-thumb is-empty"><i class="bi bi-image"></i></div>'}
                 <div class="item-publish-side-main">
                     <div class="item-publish-side-title" title="${escapeHtml(material.title || '')}">${escapeHtml(material.title || '未命名素材')}</div>
-                    <div class="item-publish-side-meta">${escapeHtml(priceText)} · ${imageCount} 张图</div>
+                    <div class="item-publish-side-meta">${escapeHtml(priceText)} · ${imageCount} 张图${escapeHtml(categoryText)}</div>
                     <div class="item-publish-side-actions">
                         <button type="button" class="btn btn-sm btn-outline-primary" onclick="loadItemPublishMaterialToForm(${material.id})">载入</button>
                         <button type="button" class="btn btn-sm btn-outline-danger" onclick="deleteItemPublishMaterial(${material.id})">删除</button>
@@ -11462,6 +11465,7 @@ function loadItemPublishMaterialToForm(materialId) {
     }
 
     document.getElementById('publishTitle').value = material.title || '';
+    document.getElementById('publishCategory').value = material.category || '';
     document.getElementById('publishDescription').value = material.description || '';
     document.getElementById('publishCurrentPrice').value = material.price ?? '';
     document.getElementById('publishOriginalPrice').value = material.original_price ?? '';
@@ -11583,6 +11587,7 @@ async function submitItemPublishForm() {
             const formData = new FormData();
             formData.append('cookie_id', values.accountId);
             formData.append('title', values.title);
+            formData.append('category', values.category);
             formData.append('description', values.description);
             formData.append('current_price', values.currentPrice);
             formData.append('original_price', values.originalPrice);
@@ -20367,6 +20372,7 @@ const LOCAL_VERSION_HISTORY = {
             updates: [
                 '【新功能】新增待补确认订单补偿能力，发货后平台确认失败的订单会记录待补确认状态并提供补偿入口',
                 '【新功能】在线客服会话新增拉黑入口，便于快速处理异常买家或商品会话',
+                '【优化】商品发布支持填写类目提示，参与闲鱼类目推荐并在类目路径查询失败时给出明确处理建议',
                 '【优化】会话预览优先显示最新消息，补全客服会话头像昵称，并将客服订单入口跳转到独立订单页',
                 '【修复】停止终态订单重复补确认，避免已完成、已关闭等终态订单被重复处理',
                 '【文档】精简 README 并拆分部署、配置、使用、FAQ 和发版说明文档'

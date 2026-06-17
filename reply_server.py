@@ -10339,6 +10339,7 @@ async def _publish_product_to_account(
     delivery_choice: str,
     post_price: Optional[float],
     can_self_pickup: bool,
+    category_hint: Optional[str] = None,
     material_id: Optional[int] = None,
     batch_id: Optional[str] = None,
     log_id: Optional[int] = None,
@@ -10403,12 +10404,15 @@ async def _publish_product_to_account(
                 delivery_choice=delivery_choice,
                 post_price=post_price_value,
                 can_self_pickup=bool(can_self_pickup),
+                category_hint=category_hint,
             )
             latest_cookies_str = publisher.cookies_str
             published_item_id = publisher.extract_published_item_id(publish_result)
 
             if not publisher.is_success_response(publish_result):
                 error_message = publisher.extract_error_message(publish_result)
+                if publisher.is_category_path_error(publish_result):
+                    error_message = publisher.build_category_path_error_message(publish_result)
                 if created_log_id:
                     db_manager.update_publish_log(
                         created_log_id,
@@ -10522,6 +10526,7 @@ async def _run_product_batch_publish(batch_id: str, jobs: List[Dict[str, Any]], 
                 delivery_choice=material.get('delivery_method') or '包邮',
                 post_price=material.get('postage'),
                 can_self_pickup=bool(material.get('can_self_pickup')),
+                category_hint=material.get('category'),
                 material_id=material.get('id'),
                 batch_id=batch_id,
                 log_id=log_id,
@@ -10685,6 +10690,7 @@ async def publish_product_json(
         delivery_choice=data.get('delivery_method') or '包邮',
         post_price=data.get('postage'),
         can_self_pickup=bool(data.get('can_self_pickup')),
+        category_hint=data.get('category'),
     )
 
 
@@ -10901,6 +10907,7 @@ async def publish_item(
     cookie_id: str = Form(...),
     title: str = Form(...),
     description: str = Form(default=""),
+    category: str = Form(default=""),
     current_price: str = Form(default=""),
     original_price: str = Form(default=""),
     delivery_choice: str = Form(...),
@@ -10935,6 +10942,7 @@ async def publish_item(
         delivery_choice=delivery_choice,
         post_price=post_price,
         can_self_pickup=_parse_form_bool(can_self_pickup),
+        category_hint=category,
     )
 
 
