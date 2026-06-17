@@ -874,6 +874,7 @@ class DBManager:
                 session_id TEXT,
                 trigger_scene TEXT,
                 result_code TEXT,
+                captcha_engine TEXT,
                 event_description TEXT,
                 event_meta TEXT,
                 processing_result TEXT,
@@ -1108,6 +1109,7 @@ Cookie数量: {cookie_count}
                 'session_id': "TEXT",
                 'trigger_scene': "TEXT",
                 'result_code': "TEXT",
+                'captcha_engine': "TEXT",
                 'event_meta': "TEXT",
                 'duration_ms': "INTEGER",
             }
@@ -9109,7 +9111,8 @@ Cookie数量: {cookie_count}
                            event_description: str = None, processing_result: str = None,
                            processing_status: str = 'processing', error_message: str = None,
                            session_id: str = None, trigger_scene: str = None,
-                           result_code: str = None, event_meta: Any = None,
+                           result_code: str = None, captcha_engine: str = None,
+                           event_meta: Any = None,
                            duration_ms: Optional[int] = None):
         """
         添加风控日志记录
@@ -9135,15 +9138,16 @@ Cookie数量: {cookie_count}
                 cursor = self.conn.cursor()
                 cursor.execute('''
                     INSERT INTO risk_control_logs
-                    (cookie_id, event_type, session_id, trigger_scene, result_code, event_description,
+                    (cookie_id, event_type, session_id, trigger_scene, result_code, captcha_engine, event_description,
                      event_meta, processing_result, processing_status, error_message, duration_ms)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     cookie_id,
                     event_type,
                     session_id,
                     trigger_scene,
                     result_code,
+                    captcha_engine,
                     event_description,
                     self._serialize_risk_control_event_meta(event_meta),
                     processing_result,
@@ -9161,6 +9165,7 @@ Cookie数量: {cookie_count}
                               processing_result: str = None, processing_status: str = None,
                               error_message: str = None, session_id: str = None,
                               trigger_scene: str = None, result_code: str = None,
+                              captcha_engine: str = None,
                               event_meta: Any = None, duration_ms: Optional[int] = None) -> bool:
         """
         更新风控日志记录
@@ -9215,6 +9220,10 @@ Cookie数量: {cookie_count}
                 if result_code is not None:
                     update_fields.append("result_code = ?")
                     params.append(result_code)
+
+                if captcha_engine is not None:
+                    update_fields.append("captcha_engine = ?")
+                    params.append(captcha_engine)
 
                 if event_meta is not None:
                     update_fields.append("event_meta = ?")

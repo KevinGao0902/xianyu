@@ -1215,6 +1215,7 @@ class XianyuLive:
         session_id: str = None,
         trigger_scene: str = None,
         result_code: str = None,
+        captcha_engine: str = None,
         event_meta: Optional[Dict[str, Any]] = None,
         duration_ms: Optional[int] = None,
     ) -> Optional[int]:
@@ -1225,6 +1226,7 @@ class XianyuLive:
                 session_id=session_id,
                 trigger_scene=trigger_scene,
                 result_code=result_code,
+                captcha_engine=captcha_engine,
                 event_description=event_description,
                 event_meta=event_meta,
                 processing_result=processing_result,
@@ -1247,6 +1249,7 @@ class XianyuLive:
         session_id: str = None,
         trigger_scene: str = None,
         result_code: str = None,
+        captcha_engine: str = None,
         event_meta: Optional[Dict[str, Any]] = None,
         duration_ms: Optional[int] = None,
     ) -> None:
@@ -1262,6 +1265,7 @@ class XianyuLive:
                 session_id=session_id,
                 trigger_scene=trigger_scene,
                 result_code=result_code,
+                captcha_engine=captcha_engine,
                 event_meta=event_meta,
                 duration_ms=duration_ms,
             )
@@ -7095,6 +7099,7 @@ class XianyuLive:
                                         session_id=captcha_session_id,
                                         trigger_scene=captcha_trigger_scene,
                                         result_code='slider_captcha_success',
+                                        captcha_engine=getattr(self, 'last_slider_captcha_engine', None),
                                         processing_result='滑块验证成功，已获取新Cookie',
                                         processing_status='success',
                                         duration_ms=max(0, int(captcha_duration * 1000)),
@@ -7104,6 +7109,7 @@ class XianyuLive:
                                             extra={
                                                 'cookie_id': self.cookie_id,
                                                 'cookie_length': len(new_cookies_str),
+                                                'captcha_engine': getattr(self, 'last_slider_captcha_engine', None),
                                             },
                                         ),
                                     )
@@ -7146,14 +7152,19 @@ class XianyuLive:
                                         session_id=captcha_session_id,
                                         trigger_scene=captcha_trigger_scene,
                                         result_code='slider_captcha_failed',
-                                        processing_result='滑块验证失败，未获取到新Cookie',
+                                        captcha_engine=getattr(self, 'last_slider_captcha_engine', None),
+                                        processing_result=getattr(self, 'last_slider_result_message', None) or '滑块验证失败，未获取到新Cookie',
                                         processing_status='failed',
-                                        error_message='未获取到新Cookie',
+                                        error_message=getattr(self, 'last_slider_result_message', None) or '未获取到新Cookie',
                                         duration_ms=max(0, int(captcha_duration * 1000)),
                                         event_meta=self._build_risk_event_meta(
                                             trigger_scene=captcha_trigger_scene,
                                             verification_url=verification_url,
-                                            extra={'cookie_id': self.cookie_id},
+                                            extra={
+                                                'cookie_id': self.cookie_id,
+                                                'captcha_engine': getattr(self, 'last_slider_captcha_engine', None),
+                                                'failure_message': getattr(self, 'last_slider_result_message', None),
+                                            },
                                         ),
                                     )
                                 
@@ -7493,6 +7504,7 @@ class XianyuLive:
             try:
                 # 使用集成的滑块验证方法（无需猴子补丁）
                 from utils.xianyu_slider_stealth import XianyuSliderStealth
+                from utils.slider_orchestrator import validate_slider_result
                 logger.info(f"【{self.cookie_id}】XianyuSliderStealth导入成功，使用滑块验证")
 
                 # 读取账号配置以决定浏览器模式（默认无头）
@@ -7512,18 +7524,16 @@ class XianyuLive:
 
                 # 直接使用异步方法执行滑块验证（避免 ThreadPoolExecutor 导致的 Playwright 初始化问题）
                 success, cookies = await slider_stealth.async_run(verification_url)
+                strict_result = validate_slider_result(success, cookies, engine="playwright")
+                self.last_slider_captcha_engine = strict_result.engine
+                self.last_slider_result_message = strict_result.message
 
-                if success and cookies:
-                    logger.info(f"【{self.cookie_id}】滑块验证成功，获取到新的cookies")
+                if strict_result.success and strict_result.cookies:
+                    cookies = strict_result.cookies
+                    logger.info(f"【{self.cookie_id}】滑块验证成功，获取到新的x5相关cookies")
 
                     current_cookies_dict = trans_cookies(self.cookies_str)
-                    x5sec_cookies = {}
-
-                    # 筛选出x5相关的cookies（包括x5sec, x5step等）
-                    for cookie_name, cookie_value in cookies.items():
-                        cookie_name_lower = cookie_name.lower()
-                        if cookie_name_lower.startswith('x5') or 'x5sec' in cookie_name_lower:
-                            x5sec_cookies[cookie_name] = cookie_value
+                    x5sec_cookies = strict_result.x5_cookies
 
                     logger.info(f"【{self.cookie_id}】找到{len(x5sec_cookies)}个x5相关cookies: {list(x5sec_cookies.keys())}")
 
@@ -7616,11 +7626,12 @@ class XianyuLive:
 
                     return cookies_str
                 else:
-                    logger.error(f"【{self.cookie_id}】滑块验证失败")
+                    failure_message = getattr(self, 'last_slider_result_message', None) or "滑块验证失败"
+                    logger.error(f"【{self.cookie_id}】{failure_message}")
 
                     # 记录滑块验证失败到日志文件
-                    log_captcha_event(self.cookie_id, "滑块验证失败", False,
-                        f"XianyuSliderStealth执行失败, 环境: {'Docker' if os.getenv('DOCKER_ENV') else '本地'}")
+                    log_captcha_event(self.cookie_id, failure_message, False,
+                        f"engine={getattr(self, 'last_slider_captcha_engine', 'playwright')}, 环境: {'Docker' if os.getenv('DOCKER_ENV') else '本地'}")
 
                     # 发送通知（检查WebSocket连接状态）
                     # 只有在WebSocket未连接时才发送通知，已连接说明可能是暂时性问题

@@ -1,6 +1,8 @@
 import unittest
+from unittest import mock
 
-from XianyuAutoAsync import XianyuLive
+from XianyuAutoAsync import ConnectionState, XianyuLive
+from utils.slider_orchestrator import extract_x5_cookies, has_x5_cookie, validate_slider_result
 
 
 class _FakeTokenRefreshResponse:
@@ -38,6 +40,41 @@ class _FakeSession:
             }
         )
         return self.response
+
+
+class SliderOrchestratorTest(unittest.TestCase):
+    def test_extracts_x5_cookie_variants(self):
+        cookies = {
+            "unb": "123",
+            "x5sec": "ticket",
+            "X5Step": "step",
+            "foo_x5sec_bar": "embedded",
+        }
+
+        self.assertEqual(
+            extract_x5_cookies(cookies),
+            {
+                "x5sec": "ticket",
+                "X5Step": "step",
+                "foo_x5sec_bar": "embedded",
+            },
+        )
+        self.assertTrue(has_x5_cookie(cookies))
+
+    def test_visual_success_without_x5_is_failure(self):
+        result = validate_slider_result(True, {"unb": "123", "cookie2": "abc"}, engine="playwright")
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.engine, "playwright")
+        self.assertIn("未获取到 x5sec", result.message)
+        self.assertEqual(result.x5_cookies, {})
+
+    def test_success_requires_x5_cookie(self):
+        result = validate_slider_result(True, {"unb": "123", "x5sec": "ticket"}, engine="playwright")
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.cookies["x5sec"], "ticket")
+        self.assertEqual(result.x5_cookies, {"x5sec": "ticket"})
 
 
 class XianyuTokenRefreshRequestTest(unittest.IsolatedAsyncioTestCase):

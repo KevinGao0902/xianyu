@@ -5837,6 +5837,7 @@ async def _execute_manual_cookie_import(
             XianyuSliderStealth,
             probe_cookie_verification_from_cookie,
         )
+        from utils.slider_orchestrator import run_slider_strict
         from XianyuAutoAsync import XianyuLive
 
         existing_cookie_info = db_manager.get_cookie_details(account_id) or {}
@@ -6021,18 +6022,20 @@ async def _execute_manual_cookie_import(
                     )
                 log_with_user('info', f"手动导入 Cookie 已解析 verification_url: {account_id}", current_user)
 
-                success, cookies_dict = slider_instance.run(
+                strict_result = run_slider_strict(
+                    slider_instance,
                     target_url,
+                    engine="playwright",
                     notification_callback=notification_callback,
                     notification_scene='手动导入 Cookie',
                 )
-                if not success or not cookies_dict:
-                    failure_message = slider_instance._get_slider_failure_message('滑块验证失败，请稍后重试')
+                if not strict_result.success or not strict_result.cookies:
+                    failure_message = slider_instance._get_slider_failure_message(strict_result.message)
                     _set_manual_cookie_import_session_status(session_id, 'failed', error=failure_message)
                     log_with_user('error', f"手动导入 Cookie 验证失败: {account_id}, 错误: {failure_message}", current_user)
                     return
 
-                merged_cookies_dict = merge_cookie_dicts_for_import(cookies_dict, '浏览器验证')
+                merged_cookies_dict = merge_cookie_dicts_for_import(strict_result.cookies, '浏览器验证')
                 persist_manual_cookie_import_success(merged_cookies_dict, '浏览器验证')
             except Exception as exc:
                 error_message = str(exc)
