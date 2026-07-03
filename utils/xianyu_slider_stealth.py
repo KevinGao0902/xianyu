@@ -19,6 +19,7 @@ import subprocess
 import re
 import sys
 import socket
+import signal
 from datetime import datetime
 from urllib.parse import parse_qs, urlparse
 from playwright.sync_api import sync_playwright as playwright_sync_playwright, ElementHandle
@@ -1044,6 +1045,7 @@ class XianyuSliderStealth:
                     self.browser_channel = detected_channel
         self.playwright = None
         self._playwright_thread_id: Optional[int] = None
+        self._browser_pid: Optional[int] = None
         # 内层 _detect_qr_code_verification 滑块自救成功后的兜底回流标记，由 run() 入口重置
         self._post_recovery_success: bool = False
         self._post_recovery_cookies = None
@@ -2371,6 +2373,7 @@ class XianyuSliderStealth:
                     )
                     launched_with_persistent_profile = True
                     self.browser = None
+                    self._browser_pid = self._extract_browser_pid(self.context)
                 except Exception as persistent_launch_error:
                     if not self._is_profile_in_use_launch_error(persistent_launch_error):
                         raise
@@ -2403,6 +2406,7 @@ class XianyuSliderStealth:
             if not launched_with_persistent_profile:
                 try:
                     self.browser = self.playwright.chromium.launch(**launch_options)
+                    self._browser_pid = self._extract_browser_pid(self.browser)
                 except Exception as launch_error:
                     if self.headless and (launch_options.get("executable_path") or launch_options.get("channel")):
                         fallback_options = dict(launch_options)
@@ -2412,6 +2416,7 @@ class XianyuSliderStealth:
                             f"【{self.pure_user_id}】指定浏览器无头启动失败，回退到 Playwright Chromium: {launch_error}"
                         )
                         self.browser = self.playwright.chromium.launch(**fallback_options)
+                        self._browser_pid = self._extract_browser_pid(self.browser)
                     else:
                         raise
             
@@ -2482,6 +2487,8 @@ class XianyuSliderStealth:
                 self.browser = None
         except Exception as e:
             logger.warning(f"【{self.pure_user_id}】清理浏览器时出错: {e}")
+
+        self._force_kill_browser_process_tree("init_failure_cleanup")
         
         try:
             if hasattr(self, 'playwright') and self.playwright:
@@ -2592,6 +2599,73 @@ class XianyuSliderStealth:
             logger.debug(f"【{self.pure_user_id}】加载全局成功样本失败: {e}")
 
         return history
+
+    def _has_recent_failure_pressure(self, reference_distance: Optional[float] = None,
+                                     window_seconds: int = 24 * 3600) -> bool:
+        """Return True when recent failed drags make learned replay risky."""
+        try:
+            if not os.path.exists(self.failure_history_file):
+                return False
+
+            with open(self.failure_history_file, 'r', encoding='utf-8') as f:
+                failures = json.load(f)
+            if not isinstance(failures, list):
+                return False
+
+            now = time.time()
+            current_scene = self._normalize_learning_scene()
+            recent_failures = []
+            for record in failures:
+                if not isinstance(record, dict):
+                    continue
+
+                ts = record.get("timestamp")
+                if isinstance(ts, (int, float)) and now - float(ts) > window_seconds:
+                    continue
+
+                record_scene = self._normalize_learning_scene(
+                    record.get("trigger_scene") or record.get("risk_trigger_scene")
+                )
+                if record_scene != "generic" and current_scene != "generic" and record_scene != current_scene:
+                    continue
+
+                distance_value = record.get("distance") or record.get("slide_distance")
+                if reference_distance is not None and isinstance(distance_value, (int, float)):
+                    if abs(float(distance_value) - float(reference_distance)) > 6.0:
+                        continue
+
+                feedback = record.get("verification_feedback") or {}
+                message = str(feedback.get("message") or feedback.get("dom_error_text") or "")
+                if feedback.get("status") == "failure" or "验证失败" in message or "点击框体重试" in message:
+                    recent_failures.append(record)
+
+            if len(recent_failures) < 6:
+                return False
+
+            success_history = self._load_success_history()
+            recent_success_count = 0
+            for record in success_history:
+                if not isinstance(record, dict) or not record.get("success"):
+                    continue
+                ts = record.get("timestamp")
+                if isinstance(ts, (int, float)) and now - float(ts) > window_seconds:
+                    continue
+                distance_value = record.get("distance")
+                if reference_distance is not None and isinstance(distance_value, (int, float)):
+                    if abs(float(distance_value) - float(reference_distance)) > 6.0:
+                        continue
+                recent_success_count += 1
+
+            pressure = len(recent_failures) >= max(6, recent_success_count * 3)
+            if pressure:
+                logger.warning(
+                    f"【{self.pure_user_id}】近期滑块失败压力过高: "
+                    f"失败{len(recent_failures)}次 / 成功{recent_success_count}次，临时禁用学习轨迹复用"
+                )
+            return pressure
+        except Exception as e:
+            logger.debug(f"【{self.pure_user_id}】统计近期滑块失败压力失败: {e}")
+            return False
 
     def _normalize_learning_scene(self, trigger_scene: Optional[str] = None) -> str:
         scene = str(trigger_scene or getattr(self, "risk_trigger_scene", None) or "").strip().lower()
@@ -6782,6 +6856,61 @@ class XianyuSliderStealth:
             "steps": learned_steps,
             "bounds": bounds,
         }
+
+    def _generate_upstream_three_phase_trajectory(self, distance: float):
+        """Generate the upstream-style no-overshoot three-phase trajectory."""
+        trajectory = []
+        total_steps = random.randint(5, 6)
+        total_duration = random.uniform(0.010, 0.020)
+        avg_delay = total_duration / total_steps
+
+        accel_steps = max(2, int(round(total_steps * (0.35 + random.uniform(-0.05, 0.05)))))
+        decel_steps = max(2, int(round(total_steps * (0.30 + random.uniform(-0.05, 0.05)))))
+        const_steps = max(2, total_steps - accel_steps - decel_steps)
+        total_steps = accel_steps + const_steps + decel_steps
+
+        accel_dist = distance * (0.30 + random.uniform(-0.05, 0.05))
+        const_dist = distance * (0.55 + random.uniform(-0.05, 0.05))
+        decel_dist = distance - accel_dist - const_dist
+
+        for i in range(1, accel_steps + 1):
+            t = i / accel_steps
+            trajectory.append((
+                accel_dist * (t * t),
+                random.uniform(-1.0, 1.0),
+                avg_delay * random.uniform(1.0, 1.3),
+            ))
+
+        for i in range(1, const_steps + 1):
+            t = i / const_steps
+            delay = avg_delay * random.uniform(0.85, 1.15)
+            if random.random() < 0.03:
+                delay *= random.uniform(1.1, 1.3)
+            trajectory.append((
+                accel_dist + const_dist * t,
+                random.uniform(-1.0, 1.0) * 0.6,
+                delay,
+            ))
+
+        decel_base_x = accel_dist + const_dist
+        for i in range(1, decel_steps + 1):
+            t = i / decel_steps
+            trajectory.append((
+                decel_base_x + decel_dist * (1 - (1 - t) ** 2),
+                random.uniform(-1.0, 1.0) * 0.4,
+                avg_delay * random.uniform(1.1, 1.5),
+            ))
+
+        if trajectory:
+            _, last_y, last_delay = trajectory[-1]
+            trajectory[-1] = (distance, last_y, last_delay)
+
+        logger.info(
+            f"【{self.pure_user_id}】🧍 原仓库风格三阶段轨迹: {total_steps}步 "
+            f"(加速{accel_steps}/匀速{const_steps}/减速{decel_steps})、"
+            f"总时长≈{total_duration * 1000:.0f}ms、距离{distance:.1f}px（无超调）"
+        )
+        return trajectory
     
     def generate_human_trajectory(self, distance: float, attempt: int = 1):
         """生成人类化滑动轨迹 - 只使用极速物理模型（带智能学习+失败后增加扰动）
@@ -6812,6 +6941,10 @@ class XianyuSliderStealth:
             force_explore_threshold = ML_STRATEGY_CONFIG.get("force_explore_after_failures", 2)
             slow_fallback_threshold = max(3, force_explore_threshold + 1)
             has_learning = optimized_params.get("learning_enabled") and optimized_params.get("history_count", 0) >= 3
+            failure_pressure = self._has_recent_failure_pressure(reference_distance=distance)
+            if failure_pressure:
+                has_learning = False
+                optimized_params = dict(self.trajectory_params)
             effective_ranges = self._get_effective_learning_ranges(optimized_params)
             bounds = effective_ranges["bounds"]
 
@@ -6944,7 +7077,19 @@ class XianyuSliderStealth:
                 )
             else:
                 exploration_rate = ML_STRATEGY_CONFIG.get("exploration_rate", 0.35)
-                if self._should_force_docker_cold_start_conservative(attempt, has_learning):
+                if failure_pressure:
+                    overshoot_ratio = 1.0
+                    steps = random.randint(5, 6)
+                    base_delay = random.uniform(0.010, 0.020)
+                    acceleration_curve = 0.0
+                    y_jitter_max = 1.0
+                    selected_strategy = "upstream_three_phase"
+                    profile_name = "failure_pressure_upstream_three_phase"
+                    logger.info(
+                        f"【{self.pure_user_id}】🧱 近期失败压力过高，改用原仓库风格无超调三阶段策略: "
+                        f"步数{steps}, 延迟{base_delay*1000:.1f}ms"
+                    )
+                elif self._should_force_docker_cold_start_conservative(attempt, has_learning):
                     conservative = ML_STRATEGY_CONFIG["strategies"]["conservative"]
                     overshoot_ratio = random.uniform(*conservative["overshoot_ratio"])
                     steps = random.randint(*conservative["steps"])
@@ -7017,10 +7162,13 @@ class XianyuSliderStealth:
                                f"步数{steps}, 延迟{base_delay*1000:.1f}ms")
             
             # 生成轨迹（使用上面预生成的参数）
-            trajectory = self._generate_physics_trajectory_with_params(
-                distance, overshoot_ratio, steps, base_delay, 
-                acceleration_curve, y_jitter_max
-            )
+            if selected_strategy == "upstream_three_phase":
+                trajectory = self._generate_upstream_three_phase_trajectory(distance)
+            else:
+                trajectory = self._generate_physics_trajectory_with_params(
+                    distance, overshoot_ratio, steps, base_delay,
+                    acceleration_curve, y_jitter_max
+                )
             
             logger.debug(f"【{self.pure_user_id}】轨迹模式: 贝塞尔超调后回退，执行配置={selected_strategy}/{profile_name}")
             
@@ -7472,30 +7620,41 @@ class XianyuSliderStealth:
                 last_x, last_y = 0, 0
                 
                 # 执行拖动轨迹 - 直接移动到每个点
+                trajectory_profile = str(
+                    ((getattr(self, "current_trajectory_data", {}) or {}).get("random_params", {}) or {}).get("profile", "")
+                )
+                use_upstream_steps = trajectory_profile == "failure_pressure_upstream_three_phase"
                 for i, (x, y, delay) in enumerate(trajectory):
                     # 更新当前位置
                     current_x = start_x + x
                     current_y = start_y + y
                     
-                    # 🔧 关键改进：直接移动到目标点，不使用 steps 插值
-                    # 如果位移过大（>30px），分多次小步移动以更自然
-                    dx = x - last_x
-                    dy = y - last_y
-                    move_distance = math.sqrt(dx*dx + dy*dy)
-                    
-                    if move_distance > 30:
-                        # 大位移时，分成多个小步
-                        sub_steps = max(2, int(move_distance / 15))
-                        for j in range(sub_steps):
-                            progress = (j + 1) / sub_steps
-                            sub_x = start_x + last_x + dx * progress
-                            sub_y = start_y + last_y + dy * progress
-                            self.page.mouse.move(sub_x, sub_y)
-                            # 小步之间只有极短延迟
-                            time.sleep(random.uniform(0.001, 0.003))
+                    if use_upstream_steps:
+                        self.page.mouse.move(
+                            current_x,
+                            current_y,
+                            steps=random.randint(1, 3)
+                        )
                     else:
-                        # 小位移直接移动
-                        self.page.mouse.move(current_x, current_y)
+                        # 🔧 关键改进：直接移动到目标点，不使用 steps 插值
+                        # 如果位移过大（>30px），分多次小步移动以更自然
+                        dx = x - last_x
+                        dy = y - last_y
+                        move_distance = math.sqrt(dx*dx + dy*dy)
+
+                        if move_distance > 30:
+                            # 大位移时，分成多个小步
+                            sub_steps = max(2, int(move_distance / 15))
+                            for j in range(sub_steps):
+                                progress = (j + 1) / sub_steps
+                                sub_x = start_x + last_x + dx * progress
+                                sub_y = start_y + last_y + dy * progress
+                                self.page.mouse.move(sub_x, sub_y)
+                                # 小步之间只有极短延迟
+                                time.sleep(random.uniform(0.001, 0.003))
+                        else:
+                            # 小位移直接移动
+                            self.page.mouse.move(current_x, current_y)
                     
                     last_x, last_y = x, y
                     
@@ -7548,6 +7707,24 @@ class XianyuSliderStealth:
                 post_up_pause = random.uniform(0.02, 0.06)
                 slide_behavior['post_up_pause'] = post_up_pause
                 time.sleep(post_up_pause * _tempo(7))
+
+                try:
+                    slider_button.evaluate(
+                        """(slider, point) => {
+                            const event = new MouseEvent('click', {
+                                bubbles: true,
+                                cancelable: true,
+                                view: window,
+                                clientX: point.x,
+                                clientY: point.y,
+                                button: 0
+                            });
+                            slider.dispatchEvent(event);
+                        }""",
+                        {"x": current_x, "y": current_y},
+                    )
+                except Exception as e:
+                    logger.debug(f"【{self.pure_user_id}】释放后补发click事件失败（可忽略）: {e}")
 
                 # 等待服务端验证判定（关键：阿里滑块验证是异步的，需要给服务端足够时间返回结果）
                 if "server_judge_wait" in learned_behavior:
@@ -9611,6 +9788,95 @@ class XianyuSliderStealth:
             else:
                 logger.warning(f"【{self.pure_user_id}】{action} {obj_name} 时出错: {e}")
 
+    def _extract_browser_pid(self, runtime_obj) -> Optional[int]:
+        """尽量从 Playwright runtime 对象上提取浏览器进程 PID。"""
+        try:
+            process = getattr(runtime_obj, "process", None)
+            pid = getattr(process, "pid", None)
+            if pid:
+                return int(pid)
+        except Exception:
+            pass
+        try:
+            browser = getattr(runtime_obj, "browser", None)
+            process = getattr(browser, "process", None) if browser else None
+            pid = getattr(process, "pid", None)
+            if pid:
+                return int(pid)
+        except Exception:
+            pass
+        return None
+
+    def _collect_process_tree(self, root_pid: int) -> List[int]:
+        """收集给定 PID 的全部子孙进程，避免残留 Chromium 进程树。"""
+        try:
+            output = subprocess.check_output(
+                ["ps", "-eo", "pid=,ppid="],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            return [root_pid]
+
+        parent_map: Dict[int, List[int]] = {}
+        for line in output.splitlines():
+            parts = line.strip().split()
+            if len(parts) != 2:
+                continue
+            try:
+                pid = int(parts[0])
+                ppid = int(parts[1])
+            except Exception:
+                continue
+            parent_map.setdefault(ppid, []).append(pid)
+
+        to_visit = [root_pid]
+        seen = set()
+        ordered: List[int] = []
+        while to_visit:
+            pid = to_visit.pop()
+            if pid in seen:
+                continue
+            seen.add(pid)
+            ordered.append(pid)
+            to_visit.extend(parent_map.get(pid, []))
+        return ordered
+
+    def _force_kill_browser_process_tree(self, reason: str = "") -> bool:
+        """兜底终止浏览器进程树，用于 close 失败或页面崩溃后的残留清理。"""
+        pid = self._browser_pid
+        if not pid:
+            return False
+
+        reason_suffix = f"（{reason}）" if reason else ""
+        try:
+            process_tree = self._collect_process_tree(int(pid))
+            if not process_tree:
+                return False
+
+            logger.warning(
+                f"【{self.pure_user_id}】开始兜底清理浏览器进程树{reason_suffix}: {process_tree}"
+            )
+
+            for signal_name, sig in (("TERM", signal.SIGTERM), ("KILL", signal.SIGKILL)):
+                for proc_pid in process_tree:
+                    try:
+                        os.kill(proc_pid, sig)
+                    except ProcessLookupError:
+                        continue
+                    except PermissionError as e:
+                        logger.warning(f"【{self.pure_user_id}】终止进程 {proc_pid} 失败: {e}")
+                    except Exception as e:
+                        logger.debug(f"【{self.pure_user_id}】清理进程 {proc_pid} 时出错: {e}")
+
+                time.sleep(0.4 if signal_name == "TERM" else 0.2)
+
+            self._browser_pid = None
+            return True
+        except Exception as e:
+            logger.warning(f"【{self.pure_user_id}】兜底清理浏览器进程树失败: {e}")
+            return False
+
     def close_browser(self):
         """安全关闭浏览器并清理资源"""
         logger.info(f"【{self.pure_user_id}】开始清理资源...")
@@ -9642,6 +9908,9 @@ class XianyuSliderStealth:
             # 不论 stop 成功与否，都把引用置空，避免下一次 close_browser 又对死引用操作
             self.playwright = None
             self._playwright_thread_id = None
+
+        # 再补一层浏览器子进程兜底清理，防止 browser.close()/playwright.stop() 没有真正回收干净
+        self._force_kill_browser_process_tree("close_browser")
 
         # 清理临时目录
         try:
@@ -10825,6 +11094,7 @@ class XianyuSliderStealth:
 
             if not browser:
                 browser = context.browser
+            self._browser_pid = self._extract_browser_pid(browser or context)
             page = context.new_page()
             self._apply_headless_network_fingerprint(page, browser_features)
             observed_set_cookie_updates: Dict[str, str] = {}
@@ -11727,12 +11997,15 @@ class XianyuSliderStealth:
 
                     if close_thread.is_alive():
                         logger.warning(f"【{self.pure_user_id}】关闭浏览器超时，改为后台继续清理，避免阻塞密码登录会话收尾")
+                        self._force_kill_browser_process_tree("password_login_close_timeout")
                     elif close_errors:
                         logger.warning(f"【{self.pure_user_id}】关闭浏览器时出现异常: {close_errors}")
+                        self._force_kill_browser_process_tree("password_login_close_error")
                     elif effective_clean_context:
                         logger.info(f"【{self.pure_user_id}】浏览器已关闭，干净上下文已销毁")
                     else:
                         logger.info(f"【{self.pure_user_id}】浏览器已关闭，缓存已保存")
+                        self._browser_pid = None
                 except Exception as e:
                     logger.warning(f"【{self.pure_user_id}】关闭浏览器时出错: {e}")
 
@@ -12221,19 +12494,30 @@ class XianyuSliderStealth:
                 
                 if success:
                     logger.info(f"【{self.pure_user_id}】滑块验证成功")
-                    
+
                     # 等待页面完全加载和跳转，让新的cookie生效（快速模式）
                     try:
                         logger.info(f"【{self.pure_user_id}】等待页面加载...")
                         time.sleep(1)  # 快速等待，从3秒减少到1秒
-                        
+
                         # 等待页面跳转或刷新
                         self.page.wait_for_load_state("networkidle", timeout=10000)
                         time.sleep(0.5)  # 快速确认，从2秒减少到0.5秒
-                        
+
                         logger.info(f"【{self.pure_user_id}】页面加载完成，开始获取cookie")
                     except Exception as e:
-                        logger.warning(f"【{self.pure_user_id}】等待页面加载时出错: {str(e)}")
+                        error_text = str(e)
+                        logger.warning(f"【{self.pure_user_id}】等待页面加载时出错: {error_text}")
+                        lowered_error = error_text.lower()
+                        if "page crashed" in lowered_error or "target crashed" in lowered_error:
+                            self.last_login_error = f"浏览器页面崩溃: {error_text}"
+                            self.last_verification_feedback = {
+                                "status": "error",
+                                "source": "page_crashed",
+                                "message": error_text,
+                            }
+                            self._save_debug_snapshot("page_crashed", getattr(self, "_detected_slider_frame", None))
+                            return False, None
 
                     monitor_page = self._select_monitor_page(self.context, self.page) or self.page
                     has_qr, qr_frame = self._detect_qr_code_verification(monitor_page)
@@ -12249,7 +12533,7 @@ class XianyuSliderStealth:
                         if verification_result:
                             return True, verification_result
                         return False, None
-                    
+
                     # 在关闭浏览器前获取cookie
                     try:
                         cookies = self._get_cookies_after_success()
@@ -12280,7 +12564,7 @@ class XianyuSliderStealth:
                         )
                         return True, self._post_recovery_cookies
                     self._save_debug_snapshot("run_failed", getattr(self, "_detected_slider_frame", None))
-                
+
                 return success, cookies
             else:
                 logger.info(f"【{self.pure_user_id}】页面内容不包含验证码相关关键词，可能不需要验证")
@@ -12301,7 +12585,14 @@ class XianyuSliderStealth:
                 return True, None
                 
         except Exception as e:
-            logger.error(f"【{self.pure_user_id}】执行过程中出错: {str(e)}")
+            error_text = str(e)
+            logger.error(f"【{self.pure_user_id}】执行过程中出错: {error_text}")
+            self.last_login_error = error_text
+            self.last_verification_feedback = {
+                "status": "error",
+                "source": "exception",
+                "message": error_text,
+            }
             return False, None
         finally:
             # 关闭浏览器
