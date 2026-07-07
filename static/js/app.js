@@ -20497,7 +20497,7 @@ function exportSearchResults() {
 
 
 // 默认版本号（当无法读取 version.txt 时使用）
-const DEFAULT_VERSION = 'v2.0.3';
+const DEFAULT_VERSION = 'v2.0.4';
 
 // 当前本地版本号（动态从 version.txt 读取）
 let LOCAL_VERSION = DEFAULT_VERSION;
@@ -20608,9 +20608,22 @@ function clearIgnoredUpdateVersion(showFeedback = true) {
 
 // 本地版本历史（远程服务禁用时使用）
 const LOCAL_VERSION_HISTORY = {
-    version: 'v2.0.3',
+    version: 'v2.0.4',
     intro: '本系统仅供个人学习研究使用，请勿用于商业用途。如有问题或建议，欢迎反馈。',
     versionHistory: [
+        {
+            version: 'v2.0.4',
+            date: '2026-07-07',
+            updates: [
+                '【新功能】新增 noVNC 手动风控接管入口，Docker 环境可通过浏览器远程查看并人工处理滑块、验证码和账号风险提示',
+                '【新功能】新增远程滑块服务与统一滑块兜底编排，外部服务可接收验证 URL 并回传有效 x5sec Cookie',
+                '【优化】风控日志与滑块统计展示验证引擎来源，便于区分 Playwright、DrissionPage、远程和手动处理链路',
+                '【优化】商品发布支持类目提示，参与闲鱼类目推荐并在类目路径查询失败时给出更明确处理建议',
+                '【优化】补强订单恢复与待补确认处理，支持按订单信息恢复待补订单并衔接自动发货流程',
+                '【修复】严格校验滑块 x5sec 结果，避免无效 Cookie 或未通过滑块的结果被误判为成功',
+                '【文档】整理 README Star History 区块 HTML 缩进，保持文档结构一致'
+            ]
+        },
         {
             version: 'v2.0.3',
             date: '2026-06-16',
