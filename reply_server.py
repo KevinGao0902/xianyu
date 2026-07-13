@@ -31,6 +31,7 @@ from file_log_collector import setup_file_logging, get_file_log_collector
 from ai_reply_engine import ai_reply_engine
 from blacklist_service import blacklist_service
 from message_filter_service import message_filter_service
+from x_resource_service import build_product_material, x_resource_service, XResourceServiceError
 from utils.qr_login import qr_login_manager
 from utils.qr_login_lite import qrcode_login_lite
 from utils.xianyu_utils import trans_cookies
@@ -1257,6 +1258,141 @@ if not os.path.exists(static_dir):
     os.makedirs(static_dir, exist_ok=True)
 
 app.mount('/static', StaticFiles(directory=static_dir), name='static')
+
+
+@app.get('/x-resources/health')
+async def get_x_resource_health(current_user: Dict[str, Any] = Depends(get_current_user)):
+    try:
+        return await x_resource_service.health()
+    except XResourceServiceError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get('/x-resources')
+async def list_x_resources(
+    page: int = 1,
+    page_size: int = 20,
+    stage: str = '',
+    q: str = '',
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    try:
+        upstream = await x_resource_service.list_resources(page=1, page_size=100, query=q)
+        resources = list(upstream.get('items') or [])
+        for upstream_page in range(2, int(upstream.get('totalPages') or 1) + 1):
+            next_page = await x_resource_service.list_resources(page=upstream_page, page_size=100, query=q)
+            resources.extend(next_page.get('items') or [])
+        for resource in resources:
+            marker = f"x-resource:{resource.get('uniqueKey') or ''}"
+            material = db_manager.get_product_material_by_remark(current_user['user_id'], marker)
+            if material:
+                resource['workflowStage'] = 'material_synced'
+                resource['materialId'] = material.get('id')
+        counts = {'total': len(resources)}
+        for resource in resources:
+            workflow_stage = resource.get('workflowStage') or 'unknown'
+            counts[workflow_stage] = counts.get(workflow_stage, 0) + 1
+        filtered = [resource for resource in resources if not stage or resource.get('workflowStage') == stage]
+        safe_page = max(1, page)
+        safe_page_size = min(100, max(1, page_size))
+        offset = (safe_page - 1) * safe_page_size
+        return {
+            'items': filtered[offset:offset + safe_page_size],
+            'page': safe_page,
+            'pageSize': safe_page_size,
+            'total': len(filtered),
+            'totalPages': max(1, (len(filtered) + safe_page_size - 1) // safe_page_size),
+            'counts': counts,
+        }
+    except XResourceServiceError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get('/x-resources/detail/{unique_key:path}')
+async def get_x_resource(
+    unique_key: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    try:
+        return await x_resource_service.get_resource(unique_key)
+    except XResourceServiceError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+class XResourceProcessRequest(BaseModel):
+    unique_keys: List[str]
+
+
+def _create_x_resource_material_for_user(resource: Dict[str, Any], user_id: int) -> Dict[str, Any]:
+    unique_key = str(resource.get('uniqueKey') or '')
+    marker = f"x-resource:{unique_key}"
+    existing = db_manager.get_product_material_by_remark(user_id, marker)
+    if existing:
+        return {"success": True, "created": False, "material": existing}
+    if resource.get('workflowStage') != 'ready_for_material':
+        raise HTTPException(status_code=409, detail="资源尚未完成审核和夸克转存，不能生成商品素材")
+    try:
+        default_price = max(0, float(os.getenv('X_RESOURCE_DEFAULT_PRICE', '9.9')))
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail="X_RESOURCE_DEFAULT_PRICE 配置无效") from exc
+    data = _normalize_product_publish_data(build_product_material(resource, default_price), partial=False)
+    material_id = db_manager.add_product_material(user_id, data)
+    if not material_id:
+        raise HTTPException(status_code=500, detail="生成商品素材失败")
+    return {
+        "success": True,
+        "created": True,
+        "material": db_manager.get_product_material(material_id, user_id),
+    }
+
+
+@app.post('/x-resources/process')
+async def process_x_resources(
+    request: XResourceProcessRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    unique_keys = list(dict.fromkeys(str(key).strip() for key in request.unique_keys if str(key).strip()))
+    if not unique_keys:
+        raise HTTPException(status_code=400, detail="请选择需要处理的资源")
+    try:
+        upstream = await x_resource_service.process_resources(unique_keys)
+    except XResourceServiceError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    material_results = []
+    for item in upstream.get('results') or []:
+        if item.get('transferStatus') != 'saved' or item.get('error'):
+            continue
+        unique_key = str(item.get('uniqueKey') or '')
+        try:
+            resource = await x_resource_service.get_resource(unique_key)
+            material = _create_x_resource_material_for_user(resource, current_user['user_id'])
+            material_results.append({
+                "uniqueKey": unique_key,
+                "created": material['created'],
+                "materialId": material['material'].get('id') if material.get('material') else None,
+            })
+        except (XResourceServiceError, HTTPException) as exc:
+            detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+            material_results.append({"uniqueKey": unique_key, "created": False, "error": detail})
+
+    return {
+        **upstream,
+        "materialCount": sum(1 for item in material_results if not item.get('error')),
+        "materialResults": material_results,
+    }
+
+
+@app.post('/x-resources/material/{unique_key:path}')
+async def create_x_resource_material(
+    unique_key: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    try:
+        resource = await x_resource_service.get_resource(unique_key)
+    except XResourceServiceError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return _create_x_resource_material_for_user(resource, current_user['user_id'])
 
 # 确保图片上传目录存在
 uploads_dir = os.path.join(static_dir, 'uploads', 'images')

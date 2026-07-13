@@ -125,6 +125,9 @@ function showSection(sectionName) {
     case 'accounts':         // 【账号管理菜单】
         loadCookies();
         break;
+    case 'x-resources':
+        loadXResources(1);
+        break;
     case 'item-publish':    // 【商品发布菜单】
         loadItemPublish();
         break;
@@ -10211,12 +10214,228 @@ function updatePresetSelection(selectedColor) {
     });
 }
 
+// ==================== X 资源库 ====================
+
+let xResourceCurrentPage = 1;
+let xResourceTotalPages = 1;
+let xResourceCurrentItems = [];
+const xResourceSelectedKeys = new Set();
+
+async function requestXResourceJson(path, options = {}) {
+    const token = getAuthToken();
+    const response = await fetch(`${apiBase}${path}`, {
+        ...options,
+        headers: {
+            'Authorization': `Bearer ${token}`,
+            ...(options.headers || {})
+        }
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+        throw new Error(payload.detail || payload.error || `请求失败 (${response.status})`);
+    }
+    return payload;
+}
+
+async function loadXResourceHealth() {
+    const badge = document.getElementById('xResourceServiceStatus');
+    if (!badge) return;
+    try {
+        await requestXResourceJson('/x-resources/health');
+        badge.className = 'badge text-bg-success';
+        badge.textContent = 'X 资源服务正常';
+    } catch (error) {
+        badge.className = 'badge text-bg-danger';
+        badge.textContent = 'X 资源服务未连接';
+        badge.title = error.message;
+    }
+}
+
+async function loadXResources(page = 1) {
+    const tbody = document.getElementById('xResourceList');
+    if (!tbody) return;
+    const targetPage = Math.max(1, Number(page) || 1);
+    const stage = document.getElementById('xResourceStage')?.value || '';
+    const query = document.getElementById('xResourceSearch')?.value?.trim() || '';
+    const params = new URLSearchParams({
+        page: String(targetPage),
+        page_size: '20',
+        stage,
+        q: query
+    });
+    tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-5"><span class="spinner-border spinner-border-sm me-2"></span>正在加载资源</td></tr>';
+    loadXResourceHealth();
+    try {
+        const data = await requestXResourceJson(`/x-resources?${params}`);
+        xResourceCurrentPage = Number(data.page || targetPage);
+        xResourceTotalPages = Math.max(1, Number(data.totalPages || 1));
+        renderXResourceCounts(data.counts || {});
+        xResourceCurrentItems = data.items || [];
+        renderXResourceRows(xResourceCurrentItems);
+        renderXResourcePagination(data.total || 0);
+    } catch (error) {
+        tbody.innerHTML = `<tr><td colspan="7" class="text-center py-5"><div class="text-danger mb-2">${escapeHtml(error.message)}</div><button class="btn btn-sm btn-outline-primary" onclick="loadXResources(${targetPage})">重试</button></td></tr>`;
+    }
+}
+
+function renderXResourceCounts(counts) {
+    const values = {
+        xResourceTotal: counts.total || 0,
+        xResourceNeedsReview: counts.needs_review || 0,
+        xResourcePendingTransfer: (counts.pending_transfer || 0) + (counts.transfer_error || 0),
+        xResourceReady: counts.ready_for_material || 0,
+        xResourceSynced: counts.material_synced || 0
+    };
+    Object.entries(values).forEach(([id, value]) => {
+        const element = document.getElementById(id);
+        if (element) element.textContent = value;
+    });
+}
+
+function renderXResourceRows(items) {
+    const tbody = document.getElementById('xResourceList');
+    if (!items.length) {
+        tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-5">当前筛选条件下没有资源</td></tr>';
+        return;
+    }
+    tbody.innerHTML = items.map(resource => {
+        const sourceUrl = safeExternalUrl(resource.sourceUrl);
+        const quarkUrl = safeExternalUrl(resource.ownQuarkShareUrl || resource.sourceQuarkUrl);
+        const mediaText = `${Number(resource.imageCount || 0)} 图 / ${Number(resource.videoCount || 0)} 视频`;
+        const processable = ['pending_transfer', 'transfer_error', 'ready_for_material'].includes(resource.workflowStage);
+        const materialAction = resource.workflowStage === 'ready_for_material'
+            ? `<button type="button" class="btn btn-sm btn-primary ms-1" onclick='syncXResourceMaterial(${JSON.stringify(resource.uniqueKey)})'>生成素材</button>`
+            : resource.materialId
+                ? `<button type="button" class="btn btn-sm btn-outline-primary ms-1" onclick="showSection('item-publish')">查看素材</button>`
+                : '';
+        return `
+            <tr>
+              <td><input class="form-check-input x-resource-checkbox" type="checkbox" value="${escapeHtml(resource.uniqueKey)}" ${xResourceSelectedKeys.has(resource.uniqueKey) ? 'checked' : ''} ${processable ? '' : 'disabled'} onchange='toggleXResourceSelection(${JSON.stringify(resource.uniqueKey)}, this.checked)' aria-label="选择资源"></td>
+              <td style="min-width: 280px;">
+                <div class="fw-semibold text-truncate" style="max-width: 420px;" title="${escapeHtml(resource.title || '')}">${escapeHtml(resource.title || '未命名资源')}</div>
+                <div class="small text-muted">${escapeHtml(resource.authorHandle || '未知作者')} ${resource.publishedAt ? ' · ' + escapeHtml(formatXResourceDate(resource.publishedAt)) : ''}</div>
+                <div class="small text-muted mt-1 text-truncate" style="max-width: 420px;">${escapeHtml(resource.description || '暂无描述')}</div>
+              </td>
+              <td><span class="badge text-bg-light border">${escapeHtml(resource.category || '未分类')}</span></td>
+              <td><span class="small">${mediaText}</span></td>
+              <td>${quarkUrl ? `<a href="${quarkUrl}" target="_blank" rel="noopener">打开链接</a>` : '<span class="text-muted">未生成</span>'}</td>
+              <td>${xResourceStageBadge(resource.workflowStage)}</td>
+              <td class="text-end text-nowrap">
+                ${sourceUrl ? `<a class="btn btn-sm btn-outline-secondary" href="${sourceUrl}" target="_blank" rel="noopener" title="查看 X 原帖"><i class="bi bi-box-arrow-up-right"></i></a>` : ''}
+                ${processable ? `<button type="button" class="btn btn-sm btn-outline-primary ms-1" onclick='processXResources([${JSON.stringify(resource.uniqueKey)}])'>自动处理</button>` : ''}
+                ${materialAction}
+              </td>
+            </tr>`;
+    }).join('');
+    updateXResourceSelectAll();
+}
+
+function toggleXResourceSelection(uniqueKey, checked) {
+    if (checked) xResourceSelectedKeys.add(uniqueKey);
+    else xResourceSelectedKeys.delete(uniqueKey);
+    updateXResourceSelectAll();
+}
+
+function toggleCurrentXResourcePage(checked) {
+    xResourceCurrentItems.filter(item => ['pending_transfer', 'transfer_error', 'ready_for_material'].includes(item.workflowStage)).forEach(item => {
+        if (checked) xResourceSelectedKeys.add(item.uniqueKey);
+        else xResourceSelectedKeys.delete(item.uniqueKey);
+    });
+    document.querySelectorAll('.x-resource-checkbox:not(:disabled)').forEach(checkbox => { checkbox.checked = checked; });
+}
+
+function updateXResourceSelectAll() {
+    const selectAll = document.getElementById('xResourceSelectAll');
+    if (!selectAll) return;
+    const keys = xResourceCurrentItems.filter(item => ['pending_transfer', 'transfer_error', 'ready_for_material'].includes(item.workflowStage)).map(item => item.uniqueKey);
+    selectAll.checked = keys.length > 0 && keys.every(key => xResourceSelectedKeys.has(key));
+    selectAll.indeterminate = keys.some(key => xResourceSelectedKeys.has(key)) && !selectAll.checked;
+}
+
+function processSelectedXResources() {
+    processXResources([...xResourceSelectedKeys]);
+}
+
+function processCurrentXResourcePage() {
+    processXResources(xResourceCurrentItems
+        .filter(item => ['pending_transfer', 'transfer_error', 'ready_for_material'].includes(item.workflowStage))
+        .map(item => item.uniqueKey));
+}
+
+async function processXResources(uniqueKeys) {
+    const keys = [...new Set(uniqueKeys || [])];
+    if (!keys.length) {
+        showToast('请选择待转存、转存失败或可生成素材的资源', 'warning');
+        return;
+    }
+    const status = document.getElementById('xResourceProcessStatus');
+    if (status) status.textContent = `正在自动处理 ${keys.length} 条，请不要关闭页面...`;
+    try {
+        const result = await requestXResourceJson('/x-resources/process', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ unique_keys: keys })
+        });
+        keys.forEach(key => xResourceSelectedKeys.delete(key));
+        const message = `处理 ${result.processedCount || 0} 条，转存成功 ${result.transferredCount || 0} 条，生成素材 ${result.materialCount || 0} 条${result.errorCount ? `，失败 ${result.errorCount} 条` : ''}`;
+        showToast(message, result.errorCount ? 'warning' : 'success');
+        if (status) status.textContent = message;
+        await loadXResources(xResourceCurrentPage);
+    } catch (error) {
+        if (status) status.textContent = error.message || '自动处理失败';
+        showToast(error.message || '自动处理失败', 'danger');
+    }
+}
+
+async function syncXResourceMaterial(uniqueKey) {
+    try {
+        const result = await requestXResourceJson(`/x-resources/material/${encodeURIComponent(uniqueKey)}`, { method: 'POST' });
+        showToast(result.created ? '商品素材已生成' : '该资源已经生成过商品素材', 'success');
+        await loadXResources(xResourceCurrentPage);
+    } catch (error) {
+        showToast(error.message || '生成商品素材失败', 'danger');
+    }
+}
+
+function renderXResourcePagination(total) {
+    const info = document.getElementById('xResourcePageInfo');
+    const previous = document.getElementById('xResourcePrev');
+    const next = document.getElementById('xResourceNext');
+    if (info) info.textContent = `共 ${total} 条 · 第 ${xResourceCurrentPage} / ${xResourceTotalPages} 页`;
+    if (previous) previous.disabled = xResourceCurrentPage <= 1;
+    if (next) next.disabled = xResourceCurrentPage >= xResourceTotalPages;
+}
+
+function xResourceStageBadge(stage) {
+    const stages = {
+        needs_review: ['待审核', 'text-bg-warning'],
+        pending_transfer: ['待转存', 'text-bg-secondary'],
+        transfer_error: ['转存失败', 'text-bg-danger'],
+        ready_for_material: ['可生成素材', 'text-bg-primary'],
+        material_synced: ['已同步素材', 'text-bg-success'],
+        rejected: ['已驳回', 'text-bg-dark']
+    };
+    const [label, className] = stages[stage] || [stage || '未知', 'text-bg-light border'];
+    return `<span class="badge ${className}">${escapeHtml(label)}</span>`;
+}
+
+function safeExternalUrl(value) {
+    const text = String(value || '').trim();
+    return /^https?:\/\//i.test(text) ? escapeHtml(text) : '';
+}
+
+function formatXResourceDate(value) {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? String(value || '') : date.toLocaleString('zh-CN', { hour12: false });
+}
+
 // ==================== 菜单管理功能 ====================
 
 // 菜单项配置（默认顺序）
 const DEFAULT_MENU_ITEMS = [
     { id: 'dashboard', name: '仪表盘', icon: 'bi-speedometer2', required: true },
     { id: 'accounts', name: '账号管理', icon: 'bi-person-circle', required: false },
+    { id: 'x-resources', name: 'X 资源库', icon: 'bi-archive', required: false },
     { id: 'item-publish', name: '商品发布', icon: 'bi-bag-plus', required: false },
     { id: 'items', name: '商品管理', icon: 'bi-box-seam', required: false },
     { id: 'orders', name: '订单管理', icon: 'bi-receipt-cutoff', required: false },

@@ -13,6 +13,13 @@
 API_HOST=0.0.0.0
 API_PORT=8090
 
+# X 资源助手集成（本机 Python 启动方式）
+X_RESOURCE_SERVICE_URL=http://127.0.0.1:5178
+# 两边设置为相同值；仅本机使用时可以留空
+X_RESOURCE_API_TOKEN=
+# 一键生成闲鱼素材时使用的默认价格
+X_RESOURCE_DEFAULT_PRICE=9.9
+
 # 数据存储
 DB_PATH=/app/data/xianyu_data.db
 

@@ -10086,6 +10086,26 @@ Cookie数量: {cookie_count}
                 logger.error(f"获取商品发布素材失败: {e}")
                 return None
 
+    def get_product_material_by_remark(self, user_id: int, remark: str) -> Optional[Dict[str, Any]]:
+        """按幂等标记获取当前用户的商品素材。"""
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute('''
+                    SELECT id, user_id, title, description, price, original_price, category, images,
+                           delivery_method, postage, can_self_pickup, brand, condition, remark,
+                           created_at, updated_at
+                    FROM product_materials
+                    WHERE user_id = ? AND remark = ?
+                    ORDER BY id DESC
+                    LIMIT 1
+                ''', (user_id, str(remark or '').strip()))
+                row = cursor.fetchone()
+                return self._row_to_product_material(row) if row else None
+            except Exception as e:
+                logger.error(f"按标记获取商品素材失败: {e}")
+                return None
+
     def list_product_materials(self, user_id: int = None, page: int = 1, page_size: int = 20) -> Dict[str, Any]:
         """分页查询商品发布素材。"""
         with self.lock:
