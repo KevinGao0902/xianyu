@@ -533,6 +533,11 @@ async def main():
             logger.info(f"跳过禁用的 Cookie: {cid}")
             continue
 
+        validation_error = manager.get_task_cookie_validation_error(val)
+        if validation_error:
+            logger.warning(f"跳过不完整的 Cookie 任务: {cid}，{validation_error}")
+            continue
+
         try:
             # 直接启动任务，不重新保存到数据库
             from db_manager import db_manager

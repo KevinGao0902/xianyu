@@ -14130,23 +14130,35 @@ class XianyuLive:
             target_url = "https://www.goofish.com/im"
             logger.info(f"【{target_cookie_id}】访问页面获取真实cookie: {target_url}")
 
-            # 使用更灵活的页面访问策略
+            # 页面包含长连接和持续加载资源，等待 load/domcontentloaded 偶尔会超时。
+            # 只要浏览器已经进入闲鱼域名，就可以继续读取上下文 Cookie，避免重复
+            # goto 把一次成功扫码升级成多轮风控请求。
             try:
-                # 首先尝试较短超时
                 await page.goto(target_url, wait_until='domcontentloaded', timeout=15000)
                 logger.info(f"【{target_cookie_id}】页面访问成功")
             except Exception as e:
-                if 'timeout' in str(e).lower():
-                    logger.warning(f"【{target_cookie_id}】页面访问超时，尝试降级策略...")
+                error_text = str(e).lower()
+                current_url = str(page.url or '')
+                reached_goofish = 'goofish.com' in current_url
+                if 'timeout' in error_text and reached_goofish:
+                    logger.warning(
+                        f"【{target_cookie_id}】页面加载超时但已进入闲鱼页面，"
+                        f"继续读取Cookie: {current_url}"
+                    )
+                elif 'timeout' in error_text:
+                    logger.warning(f"【{target_cookie_id}】页面访问超时且尚未进入闲鱼页面，尝试等待导航提交...")
                     try:
-                        # 降级策略：只等待基本加载
-                        await page.goto(target_url, wait_until='load', timeout=20000)
-                        logger.info(f"【{target_cookie_id}】页面访问成功（降级策略）")
+                        await page.goto(target_url, wait_until='commit', timeout=10000)
+                        logger.info(f"【{target_cookie_id}】页面导航已提交，继续读取Cookie")
                     except Exception as e2:
-                        logger.warning(f"【{target_cookie_id}】降级策略也失败，尝试最基本访问...")
-                        # 最后尝试：不等待任何加载完成
-                        await page.goto(target_url, timeout=25000)
-                        logger.info(f"【{target_cookie_id}】页面访问成功（最基本策略）")
+                        current_url = str(page.url or '')
+                        if 'goofish.com' in current_url:
+                            logger.warning(
+                                f"【{target_cookie_id}】导航提交等待失败但已进入闲鱼页面，"
+                                f"继续读取Cookie: {current_url}"
+                            )
+                        else:
+                            raise e2
                 else:
                     raise e
 
@@ -14164,9 +14176,7 @@ class XianyuLive:
                 if 'net::err_aborted' in error_text or 'frame was detached' in error_text:
                     logger.warning(f"【{target_cookie_id}】页面刷新被中断，继续直接读取当前上下文Cookie: {self._safe_str(e)}")
                 elif 'timeout' in error_text:
-                    logger.warning(f"【{target_cookie_id}】页面刷新超时，使用降级策略...")
-                    await page.reload(wait_until='load', timeout=15000)
-                    logger.info(f"【{target_cookie_id}】页面刷新成功（降级策略）")
+                    logger.warning(f"【{target_cookie_id}】页面刷新超时，继续读取当前上下文Cookie")
                 else:
                     raise e
             await asyncio.sleep(1)

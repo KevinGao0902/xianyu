@@ -32,6 +32,7 @@ from ai_reply_engine import ai_reply_engine
 from blacklist_service import blacklist_service
 from message_filter_service import message_filter_service
 from x_resource_service import build_product_material, x_resource_service, XResourceServiceError
+from fulfillment_service import provision_material_fulfillment
 from utils.qr_login import qr_login_manager
 from utils.qr_login_lite import qrcode_login_lite
 from utils.xianyu_utils import trans_cookies
@@ -1332,7 +1333,7 @@ def _create_x_resource_material_for_user(resource: Dict[str, Any], user_id: int)
     if resource.get('workflowStage') != 'ready_for_material':
         raise HTTPException(status_code=409, detail="资源尚未完成审核和夸克转存，不能生成商品素材")
     try:
-        default_price = max(0, float(os.getenv('X_RESOURCE_DEFAULT_PRICE', '9.9')))
+        default_price = max(0, float(os.getenv('X_RESOURCE_DEFAULT_PRICE', '0.99')))
     except ValueError as exc:
         raise HTTPException(status_code=500, detail="X_RESOURCE_DEFAULT_PRICE 配置无效") from exc
     data = _normalize_product_publish_data(build_product_material(resource, default_price), partial=False)
@@ -7334,9 +7335,45 @@ async def process_qr_login_cookies(cookies: str, unb: str, current_user: Dict[st
 
 
 async def _fallback_save_qr_cookie(account_id: str, cookies: str, user_id: int, is_new_account: bool, current_user: Dict[str, Any], error_reason: str) -> Dict[str, Any]:
-    """降级处理：当无法获取真实cookie时，保存原始扫码cookie"""
+    """保存扫码原始 Cookie，但不让不完整会话进入运行态。"""
     try:
         log_with_user('warning', f"降级处理 - 保存原始扫码cookie: {account_id}, 原因: {error_reason}", current_user)
+
+        from XianyuAutoAsync import REQUIRED_SESSION_COOKIE_FIELDS, XianyuLive
+
+        cookie_dict = trans_cookies(cookies) or {}
+        missing_required_fields = [
+            field for field in REQUIRED_SESSION_COOKIE_FIELDS
+            if not cookie_dict.get(field)
+        ]
+
+        if missing_required_fields:
+            warning_message = (
+                "扫码已确认，但登录Cookie尚未生成完整签名字段（缺少: "
+                f"{', '.join(missing_required_fields)}）。账号任务未启动，请重新扫码；"
+                "系统不会再用不完整Cookie反复触发平台风控。"
+            )
+            log_with_user('warning', f"{warning_message} 账号: {account_id}", current_user)
+
+            # 新账号保留原始 Cookie，方便页面识别账号并允许再次扫码；已有账号则
+            # 保留原来的完整会话，避免一次不完整扫码覆盖可恢复的 Cookie。
+            if is_new_account:
+                db_manager.save_cookie(account_id, cookies, user_id)
+                log_with_user('info', f"降级处理 - 新账号原始cookie已保存但未启动任务: {account_id}", current_user)
+            else:
+                log_with_user('warning', f"降级处理 - 已保留现有账号Cookie，未写入不完整扫码Cookie: {account_id}", current_user)
+
+            XianyuLive.clear_password_login_failure_backoff(account_id)
+            return {
+                'account_id': account_id,
+                'is_new_account': is_new_account,
+                'real_cookie_refreshed': False,
+                'fallback_reason': error_reason,
+                'cookie_length': len(cookies),
+                'task_restarted': False,
+                'missing_required_fields': missing_required_fields,
+                'warning_message': warning_message,
+            }
 
         # 保存原始扫码cookie到数据库
         if is_new_account:
@@ -7357,12 +7394,16 @@ async def _fallback_save_qr_cookie(account_id: str, cookies: str, user_id: int, 
                 cookie_manager.manager.update_cookie(account_id, cookies, save_to_db=False)
                 log_with_user('info', f"降级处理 - 已更新cookie_manager中的原始cookie: {account_id}", current_user)
 
+        XianyuLive.clear_password_login_failure_backoff(account_id)
+        log_with_user('info', f"降级处理 - 完整Cookie已清除旧登录退避: {account_id}", current_user)
+
         return {
             'account_id': account_id,
             'is_new_account': is_new_account,
             'real_cookie_refreshed': False,
             'fallback_reason': error_reason,
-            'cookie_length': len(cookies)
+            'cookie_length': len(cookies),
+            'task_restarted': bool(cookie_manager.manager),
         }
 
     except Exception as fallback_e:
@@ -10228,7 +10269,7 @@ class ProductMaterialRequest(BaseModel):
     original_price: Optional[float] = None
     category: Optional[str] = None
     images: List[Any] = []
-    delivery_method: str = "包邮"
+    delivery_method: str = "无需邮寄"
     postage: Optional[float] = 0
     can_self_pickup: bool = False
     brand: Optional[str] = None
@@ -10251,6 +10292,13 @@ class ProductMaterialUpdateRequest(BaseModel):
     remark: Optional[str] = None
 
 
+class ProductFulfillmentRequest(BaseModel):
+    item_title: Optional[str] = None
+    item_id: Optional[str] = None
+    keyword: Optional[str] = None
+    delay_seconds: int = 0
+
+
 class ProductBatchPublishRequest(BaseModel):
     account_ids: List[str]
     material_ids: List[int]
@@ -10263,7 +10311,7 @@ class ProductSinglePublishRequest(BaseModel):
     price: Optional[float] = None
     original_price: Optional[float] = None
     images: List[Any]
-    delivery_method: str = "包邮"
+    delivery_method: str = "无需邮寄"
     postage: Optional[float] = 0
     can_self_pickup: bool = False
     category: Optional[str] = None
@@ -10453,7 +10501,7 @@ def _normalize_product_publish_data(data: Dict[str, Any], *, partial: bool = Fal
         raise HTTPException(status_code=400, detail="填写原价时必须同时填写现价")
 
     if 'delivery_method' in data or not partial:
-        delivery_method = str(data.get('delivery_method') or '包邮').strip() or '包邮'
+        delivery_method = str(data.get('delivery_method') or '无需邮寄').strip() or '无需邮寄'
         if delivery_method not in PRODUCT_PUBLISH_DELIVERY_CHOICES:
             raise HTTPException(status_code=400, detail="不支持的运费方式")
         normalized['delivery_method'] = delivery_method
@@ -10707,7 +10755,7 @@ async def _run_product_batch_publish(batch_id: str, jobs: List[Dict[str, Any]], 
                 images=material.get('images') or [],
                 current_price=material.get('price'),
                 original_price=material.get('original_price'),
-                delivery_choice=material.get('delivery_method') or '包邮',
+                delivery_choice=material.get('delivery_method') or '无需邮寄',
                 post_price=material.get('postage'),
                 can_self_pickup=bool(material.get('can_self_pickup')),
                 category_hint=material.get('category'),
@@ -10811,6 +10859,31 @@ def delete_product_material(
     return {"success": True, "message": "商品素材删除成功"}
 
 
+@app.post("/product-materials/{material_id}/fulfillment")
+def provision_product_material_fulfillment(
+    material_id: int,
+    request: ProductFulfillmentRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """为人工发布后的闲鱼商品创建或更新卡券及自动发货规则。"""
+    material = db_manager.get_product_material(material_id, current_user['user_id'])
+    if not material:
+        raise HTTPException(status_code=404, detail="商品素材不存在")
+    try:
+        fulfillment = provision_material_fulfillment(
+            db_manager,
+            current_user['user_id'],
+            material,
+            item_title=request.item_title,
+            item_id=request.item_id,
+            keyword=request.keyword,
+            delay_seconds=request.delay_seconds,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"success": True, "message": "自动发货配置已就绪", "fulfillment": fulfillment}
+
+
 @app.get("/publish-logs")
 def list_publish_logs(
     account_id: Optional[str] = None,
@@ -10871,7 +10944,7 @@ async def publish_product_json(
         images=data.get('images') or [],
         current_price=data.get('price'),
         original_price=data.get('original_price'),
-        delivery_choice=data.get('delivery_method') or '包邮',
+        delivery_choice=data.get('delivery_method') or '无需邮寄',
         post_price=data.get('postage'),
         can_self_pickup=bool(data.get('can_self_pickup')),
         category_hint=data.get('category'),

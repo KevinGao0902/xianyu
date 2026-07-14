@@ -920,7 +920,7 @@
                         <option value="包邮">包邮</option>
                         <option value="按距离计费">按距离计费</option>
                         <option value="一口价">一口价</option>
-                        <option value="无需邮寄">无需邮寄</option>
+                        <option value="无需邮寄" selected>无需邮寄</option>
                       </select>
                     </div>
 
@@ -944,7 +944,7 @@
                       <label for="publishCurrentPrice" class="form-label">现价</label>
                       <div class="input-group">
                         <span class="input-group-text">¥</span>
-                        <input type="number" class="form-control" id="publishCurrentPrice" min="0" step="0.01" placeholder="留空则使用默认价">
+                        <input type="number" class="form-control" id="publishCurrentPrice" min="0" step="0.01" value="0.99" placeholder="留空则使用默认价">
                       </div>
                     </div>
 
@@ -952,7 +952,7 @@
                       <label for="publishOriginalPrice" class="form-label">原价</label>
                       <div class="input-group">
                         <span class="input-group-text">¥</span>
-                        <input type="number" class="form-control" id="publishOriginalPrice" min="0" step="0.01" placeholder="可选">
+                        <input type="number" class="form-control" id="publishOriginalPrice" min="0" step="0.01" value="99" placeholder="可选">
                       </div>
                     </div>
 
@@ -980,7 +980,6 @@
                         accept="image/*"
                         multiple
                         onchange="handlePublishImagesChange()"
-                        required
                       >
                       <div class="form-text" id="publishImageSummary">请上传 1-9 张图片，建议首图清晰展示商品主体。</div>
                     </div>

@@ -11335,7 +11335,7 @@ function buildItemPublishAccountLabel(account) {
 }
 
 function handlePublishDeliveryChoiceChange() {
-    const choice = document.getElementById('publishDeliveryChoice')?.value || '包邮';
+    const choice = document.getElementById('publishDeliveryChoice')?.value || '无需邮寄';
     const postPriceWrap = document.getElementById('publishPostPriceWrap');
     const postPriceInput = document.getElementById('publishPostPrice');
     const shouldShowPostPrice = choice === '一口价';
@@ -11561,7 +11561,7 @@ function getItemPublishFormValues() {
         description: document.getElementById('publishDescription')?.value.trim() || '',
         currentPrice: document.getElementById('publishCurrentPrice')?.value.trim() || '',
         originalPrice: document.getElementById('publishOriginalPrice')?.value.trim() || '',
-        deliveryChoice: document.getElementById('publishDeliveryChoice')?.value || '包邮',
+        deliveryChoice: document.getElementById('publishDeliveryChoice')?.value || '无需邮寄',
         postPrice: document.getElementById('publishPostPrice')?.value.trim() || '',
         canSelfPickup: document.getElementById('publishCanSelfPickup')?.checked || false,
         files: Array.from(document.getElementById('publishImages')?.files || [])
@@ -11659,7 +11659,7 @@ function updateItemPublishMaterialModeBadge() {
 }
 
 function getItemPublishImageSrc(image) {
-    const raw = String(image?.url || image?.image_url || image?.src || image?.data || image?.base64 || '').trim();
+    const raw = String(image?.url || image?.image_url || image?.src || image?.content || image?.data || image?.base64 || '').trim();
     if (!raw) {
         return '';
     }
@@ -11823,9 +11823,9 @@ function loadItemPublishMaterialToForm(materialId) {
     document.getElementById('publishTitle').value = material.title || '';
     document.getElementById('publishCategory').value = material.category || '';
     document.getElementById('publishDescription').value = material.description || '';
-    document.getElementById('publishCurrentPrice').value = material.price ?? '';
-    document.getElementById('publishOriginalPrice').value = material.original_price ?? '';
-    document.getElementById('publishDeliveryChoice').value = material.delivery_method || '包邮';
+    document.getElementById('publishCurrentPrice').value = material.price ?? '0.99';
+    document.getElementById('publishOriginalPrice').value = material.original_price ?? '99';
+    document.getElementById('publishDeliveryChoice').value = material.delivery_method || '无需邮寄';
     document.getElementById('publishPostPrice').value = material.postage ?? '';
     document.getElementById('publishCanSelfPickup').checked = Boolean(material.can_self_pickup);
     const imageInput = document.getElementById('publishImages');

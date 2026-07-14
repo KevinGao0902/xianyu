@@ -2,10 +2,12 @@ import unittest
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import AsyncMock
 
 import httpx
 
 from x_resource_service import build_product_material, XResourceService, XResourceServiceError
+from utils.item_publisher import ItemPublisher
 
 
 class XResourceServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -69,6 +71,34 @@ class XResourceServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("content", material["images"][0])
         self.assertEqual(material["images"][1]["url"], "https://img.example/second.jpg")
         self.assertIn("https://pan.quark.cn/s/own", material["description"])
+        self.assertEqual(material["price"], 0.99)
+        self.assertEqual(material["original_price"], 99.0)
+        self.assertEqual(material["delivery_method"], "无需邮寄")
+
+    def test_publish_form_accepts_loaded_material_images(self):
+        html = (Path(__file__).resolve().parents[1] / "static" / "index.html").read_text(encoding="utf-8")
+        image_input = html.split('id="publishImages"', 1)[1].split('>', 1)[0]
+
+        self.assertIn('value="无需邮寄" selected', html)
+        self.assertIn('id="publishCurrentPrice" min="0" step="0.01" value="0.99"', html)
+        self.assertIn('id="publishOriginalPrice" min="0" step="0.01" value="99"', html)
+        self.assertNotIn("required", image_input)
+
+    async def test_material_content_image_is_ready_for_upload(self):
+        publisher = ItemPublisher("cookie2=value", "test-account")
+        publisher.upload_image = AsyncMock(return_value={
+            "url": "https://img.example/item.jpg",
+            "width": 10,
+            "height": 10,
+        })
+
+        result = await publisher.prepare_image_for_publish({
+            "filename": "cover.jpg",
+            "content": "aW1hZ2U=",
+        })
+
+        self.assertEqual(result["url"], "https://img.example/item.jpg")
+        publisher.upload_image.assert_awaited_once_with(image_bytes=b"image", filename="cover.jpg")
 
 
 if __name__ == "__main__":

@@ -403,11 +403,22 @@ class ItemPublisher:
         ) as response:
             self._update_cookies_from_response(response)
             response_text = await response.text()
+            response_status = response.status
+            response_content_type = str(response.headers.get("content-type") or "").lower()
+
+        normalized_response = response_text.lstrip().lower()
+        if (
+            response_status in {401, 403}
+            or "text/html" in response_content_type
+            or normalized_response.startswith("<!doctype html")
+            or normalized_response.startswith("<html")
+        ):
+            raise RuntimeError("闲鱼账号登录状态已失效，请到账户管理重新登录后再发布")
 
         try:
             payload = json.loads(response_text)
         except json.JSONDecodeError as exc:
-            raise RuntimeError(f"图片上传返回异常响应: {response_text[:200]}") from exc
+            raise RuntimeError("图片上传服务返回了无法识别的响应，请稍后重试") from exc
 
         image_object = payload.get("object") or payload.get("data") or payload.get("result") or {}
         image_url = image_object.get("url") or payload.get("url")

@@ -57,6 +57,19 @@ class CookieManager:
         logger.info(f"数据重新加载完成: Cookie {old_cookies_count} -> {new_cookies_count}, 关键字组 {old_keywords_count} -> {new_keywords_count}")
         return True
 
+    @staticmethod
+    def get_task_cookie_validation_error(cookie_value: str) -> Optional[str]:
+        """返回阻止账号任务启动的 Cookie 错误；有效时返回 None。"""
+        try:
+            from utils.xianyu_utils import trans_cookies
+            cookie_dict = trans_cookies(cookie_value or '') or {}
+        except Exception as exc:
+            return f"Cookie解析失败: {exc}"
+
+        if not cookie_dict.get('_m_h5_tk'):
+            return "Cookie缺少_m_h5_tk签名令牌，请重新扫码或刷新Cookie"
+        return None
+
     # ------------------------ 内部协程 ------------------------
     async def _run_xianyu(self, cookie_id: str, cookie_value: str, user_id: int = None):
         """在事件循环中启动 XianyuLive.main"""
@@ -144,6 +157,11 @@ class CookieManager:
             self.cookies[cookie_id] = cookie_value
             # 保存到数据库，如果没有指定user_id，则保持原有绑定关系
             db_manager.save_cookie(cookie_id, cookie_value, user_id)
+
+            validation_error = self.get_task_cookie_validation_error(cookie_value)
+            if validation_error:
+                logger.warning(f"【{cookie_id}】账号任务未启动: {validation_error}")
+                return None
 
             # 获取实际保存的user_id（如果没有指定，数据库会返回实际的user_id）
             actual_user_id = user_id
@@ -440,4 +458,4 @@ class CookieManager:
 
 
 # 在 Start.py 中会把此变量赋值为具体实例
-manager: Optional[CookieManager] = None 
+manager: Optional[CookieManager] = None

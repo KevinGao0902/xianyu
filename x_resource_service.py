@@ -90,7 +90,7 @@ def _response_error(response: httpx.Response) -> str:
 x_resource_service = XResourceService()
 
 
-def build_product_material(resource: Dict[str, Any], default_price: float = 9.9) -> Dict[str, Any]:
+def build_product_material(resource: Dict[str, Any], default_price: float = 0.99) -> Dict[str, Any]:
     unique_key = str(resource.get("uniqueKey") or "").strip()
     title = str(resource.get("title") or "未命名资源").strip()[:30]
     description_parts = [str(resource.get("description") or title).strip()]
@@ -128,9 +128,10 @@ def build_product_material(resource: Dict[str, Any], default_price: float = 9.9)
         "title": title,
         "description": "\n\n".join(part for part in description_parts if part),
         "price": float(default_price),
+        "original_price": 99.0,
         "category": resource.get("category") or None,
         "images": images,
-        "delivery_method": "包邮",
+        "delivery_method": "无需邮寄",
         "postage": 0,
         "can_self_pickup": False,
         "condition": "全新",
