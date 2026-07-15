@@ -11503,6 +11503,20 @@ function renderItemPublishResult(data, isSuccess) {
         });
     }
 
+    const fulfillment = data.fulfillment || {};
+    if (fulfillment.card_id && fulfillment.rule_id) {
+        metaRows.push({
+            label: '自动发货',
+            value: `卡券 #${fulfillment.card_id}、规则 #${fulfillment.rule_id} 已启用`
+        });
+    }
+    if (fulfillment.item_reply_configured) {
+        metaRows.push({ label: '自动回复', value: '已按商品配置售前回复（不含网盘链接）' });
+    }
+    if (data.fulfillment_warning) {
+        metaRows.push({ label: '配置警告', value: data.fulfillment_warning });
+    }
+
     if (!isSuccess && data.detail) {
         metaRows.push({ label: '错误详情', value: data.detail });
     }
@@ -11625,6 +11639,7 @@ async function convertPublishFilesToImages(files) {
 function buildItemPublishJsonPayload(values, images) {
     return {
         account_id: values.accountId,
+        material_id: itemPublishLoadedMaterialId || null,
         title: values.title,
         description: values.description,
         category: values.category,
@@ -11641,6 +11656,7 @@ function buildItemPublishJsonPayload(values, images) {
 function buildItemPublishMaterialPayload(values, images) {
     const payload = buildItemPublishJsonPayload({ ...values, accountId: values.accountId || 'material' }, images);
     delete payload.account_id;
+    delete payload.material_id;
     return payload;
 }
 
@@ -11950,6 +11966,9 @@ async function submitItemPublishForm() {
             formData.append('delivery_choice', values.deliveryChoice);
             formData.append('post_price', values.postPrice);
             formData.append('can_self_pickup', values.canSelfPickup ? 'true' : 'false');
+            if (itemPublishLoadedMaterialId) {
+                formData.append('material_id', String(itemPublishLoadedMaterialId));
+            }
             values.files.forEach(file => formData.append('images', file));
 
             const response = await fetch(`${apiBase}/item-publish`, {

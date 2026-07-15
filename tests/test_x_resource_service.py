@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 import httpx
 
 from x_resource_service import build_product_material, XResourceService, XResourceServiceError
-from utils.item_publisher import ItemPublisher
+from utils.item_publisher import CategoryRecommendationError, ItemPublisher
 
 
 class XResourceServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -99,6 +99,68 @@ class XResourceServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["url"], "https://img.example/item.jpg")
         publisher.upload_image.assert_awaited_once_with(image_bytes=b"image", filename="cover.jpg")
+
+    def test_category_recommendation_reads_nested_result(self):
+        result = ItemPublisher._validate_category_recommendation({
+            "data": {
+                "result": {
+                    "categoryPredictResult": {
+                        "cat_id": "5001",
+                        "channel_cat_name": "学习资料",
+                        "channel_cat_id": "1268",
+                        "tb_cat_id": "1102",
+                    }
+                }
+            }
+        })
+
+        self.assertEqual(result, {
+            "catId": "5001",
+            "catName": "学习资料",
+            "channelCatId": "1268",
+            "tbCatId": "1102",
+        })
+
+    def test_category_recommendation_reads_clicked_card_value(self):
+        result = ItemPublisher._validate_category_recommendation({
+            "data": {
+                "cardList": [{
+                    "cardData": {
+                        "propertyName": "分类",
+                        "valuesList": [{
+                            "isClicked": "1",
+                            "catId": "5002",
+                            "catName": "教程资料",
+                            "channelCatId": "1269",
+                            "tbCatId": "1103",
+                        }],
+                    }
+                }]
+            }
+        })
+
+        self.assertEqual(result["catName"], "教程资料")
+        self.assertEqual(result["channelCatId"], "1269")
+
+    def test_category_recommendation_error_keeps_debug_payload(self):
+        response = {"data": {"cardList": [], "categoryPredictResult": {}}}
+
+        with self.assertRaises(CategoryRecommendationError) as context:
+            ItemPublisher._validate_category_recommendation(response)
+
+        self.assertIn("categoryPredictResult", context.exception.debug_payload)
+
+    def test_strong_verify_error_has_actionable_message(self):
+        response = {
+            "ret": ["FAIL_BIZ_STRONG_VALID_VERIFY_INFO::用户未通过认证"],
+        }
+
+        self.assertTrue(ItemPublisher.is_strong_verify_error(response))
+        message = ItemPublisher.build_strong_verify_error_message(response, "682496487")
+        self.assertIn("账号 682496487", message)
+        self.assertIn("闲鱼 App", message)
+        self.assertIn("刷新 Cookie", message)
+        self.assertIn("程序无法代替或绕过", message)
 
 
 if __name__ == "__main__":

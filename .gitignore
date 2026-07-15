@@ -540,6 +540,7 @@ tmp_*.py
 quick_*.py
 fix_*.py
 test_*.py
+!tests/test_fulfillment_service.py
 check_*.py
 debug_*.py
 

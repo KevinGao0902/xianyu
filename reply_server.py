@@ -10293,6 +10293,7 @@ class ProductMaterialUpdateRequest(BaseModel):
 
 
 class ProductFulfillmentRequest(BaseModel):
+    account_id: Optional[str] = None
     item_title: Optional[str] = None
     item_id: Optional[str] = None
     keyword: Optional[str] = None
@@ -10306,6 +10307,7 @@ class ProductBatchPublishRequest(BaseModel):
 
 class ProductSinglePublishRequest(BaseModel):
     account_id: str
+    material_id: Optional[int] = None
     title: str
     description: str
     price: Optional[float] = None
@@ -10576,10 +10578,15 @@ async def _publish_product_to_account(
     batch_id: Optional[str] = None,
     log_id: Optional[int] = None,
 ) -> Dict[str, Any]:
-    from utils.item_publisher import ItemPublisher
+    from utils.item_publisher import CategoryRecommendationError, ItemPublisher
 
     user_prefix = get_user_log_prefix(current_user)
     cleaned_account_id = _ensure_cookie_access(account_id, current_user)
+    material = None
+    if material_id is not None:
+        material = db_manager.get_product_material(int(material_id), current_user['user_id'])
+        if not material:
+            raise HTTPException(status_code=404, detail="商品素材不存在或不属于当前用户")
     cookies_map = _get_user_cookies_map(current_user)
     cookies_str = str(cookies_map.get(cleaned_account_id) or '').strip()
     if not cookies_str:
@@ -10643,7 +10650,12 @@ async def _publish_product_to_account(
 
             if not publisher.is_success_response(publish_result):
                 error_message = publisher.extract_error_message(publish_result)
-                if publisher.is_category_path_error(publish_result):
+                if publisher.is_strong_verify_error(publish_result):
+                    error_message = publisher.build_strong_verify_error_message(
+                        publish_result,
+                        cleaned_account_id,
+                    )
+                elif publisher.is_category_path_error(publish_result):
                     error_message = publisher.build_category_path_error_message(publish_result)
                 if created_log_id:
                     db_manager.update_publish_log(
@@ -10684,6 +10696,34 @@ async def _publish_product_to_account(
         sync_status, sync_message, sync_total_count, sync_saved_count = _summarize_publish_sync(sync_result)
         item_url = _build_published_item_url(published_item_id)
 
+        fulfillment_result = None
+        fulfillment_warning = None
+        if material:
+            if published_item_id:
+                try:
+                    fulfillment_result = provision_material_fulfillment(
+                        db_manager,
+                        current_user['user_id'],
+                        material,
+                        account_id=cleaned_account_id,
+                        item_title=cleaned_title,
+                        item_id=published_item_id,
+                    )
+                except Exception as fulfillment_exc:
+                    fulfillment_warning = f"商品已发布，但自动回复/卡券/自动发货配置失败: {str(fulfillment_exc)}"
+                    logger.warning(
+                        f"{user_prefix} 发布后自动发货配置失败: cookie_id={cleaned_account_id}, "
+                        f"item_id={published_item_id}, material_id={material_id}, "
+                        f"error={mask_sensitive_text(fulfillment_exc)}"
+                    )
+            else:
+                fulfillment_warning = "商品已发布，但未获取到商品 ID，暂未配置自动回复和自动发货"
+
+        if fulfillment_result:
+            sync_message = f"{sync_message}；自动回复、卡券和自动发货已配置"
+        elif fulfillment_warning:
+            sync_message = f"{sync_message}；{fulfillment_warning}"
+
         if created_log_id:
             db_manager.update_publish_log(
                 created_log_id,
@@ -10703,6 +10743,10 @@ async def _publish_product_to_account(
             success_message = "商品发布成功，已同步到商品管理"
         elif sync_result.get('message'):
             success_message = f"商品发布成功，{sync_result['message']}"
+        if fulfillment_result:
+            success_message += "；自动回复、卡券和自动发货已就绪"
+        elif fulfillment_warning:
+            success_message += f"；{fulfillment_warning}"
 
         logger.info(
             f"{user_prefix} 商品发布完成: cookie_id={cleaned_account_id}, "
@@ -10718,12 +10762,23 @@ async def _publish_product_to_account(
             "batch_id": batch_id,
             "publish_result": publish_result,
             "sync_result": sync_result,
+            "fulfillment": fulfillment_result,
+            "fulfillment_warning": fulfillment_warning,
         }
 
     except HTTPException as exc:
         if created_log_id and exc.status_code >= 400:
             db_manager.update_publish_log(created_log_id, status='failed', error_message=str(exc.detail))
         raise
+    except CategoryRecommendationError as exc:
+        if created_log_id:
+            db_manager.update_publish_log(
+                created_log_id,
+                status='failed',
+                error_message=str(exc),
+                raw_response=getattr(exc, 'debug_payload', None),
+            )
+        raise HTTPException(status_code=400, detail=str(exc))
     except ValueError as exc:
         if created_log_id:
             db_manager.update_publish_log(created_log_id, status='failed', error_message=str(exc))
@@ -10876,6 +10931,7 @@ def provision_product_material_fulfillment(
             material,
             item_title=request.item_title,
             item_id=request.item_id,
+            account_id=request.account_id,
             keyword=request.keyword,
             delay_seconds=request.delay_seconds,
         )
@@ -10948,6 +11004,7 @@ async def publish_product_json(
         post_price=data.get('postage'),
         can_self_pickup=bool(data.get('can_self_pickup')),
         category_hint=data.get('category'),
+        material_id=request.material_id,
     )
 
 
@@ -11170,6 +11227,7 @@ async def publish_item(
     delivery_choice: str = Form(...),
     post_price: str = Form(default=""),
     can_self_pickup: str = Form(default="false"),
+    material_id: Optional[int] = Form(default=None),
     images: List[UploadFile] = File(...),
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
@@ -11199,6 +11257,7 @@ async def publish_item(
         delivery_choice=delivery_choice,
         post_price=post_price,
         can_self_pickup=_parse_form_bool(can_self_pickup),
+        material_id=material_id,
         category_hint=category,
     )
 

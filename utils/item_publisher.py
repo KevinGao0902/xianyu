@@ -12,6 +12,14 @@ from loguru import logger
 from utils.xianyu_utils import generate_sign, trans_cookies
 
 
+class CategoryRecommendationError(ValueError):
+    """Raised when the publish recommendation API cannot provide a complete category."""
+
+    def __init__(self, message: str, debug_payload: Optional[Dict[str, Any]] = None):
+        super().__init__(message)
+        self.debug_payload = debug_payload or {}
+
+
 class ItemPublisher:
     """闲鱼商品发布服务。"""
 
@@ -24,6 +32,7 @@ class ItemPublisher:
     )
     ALLOWED_DELIVERY_CHOICES = {"包邮", "按距离计费", "一口价", "无需邮寄"}
     CATEGORY_PATH_ERROR_CODE = "FAIL_BIZ_CHANNEL_CAT_ID_PATH_QUERY_ERROR"
+    STRONG_VERIFY_ERROR_CODE = "FAIL_BIZ_STRONG_VALID_VERIFY_INFO"
 
     def __init__(self, cookies_str: str, cookie_id: str = "", proxy_config: Optional[Dict[str, Any]] = None):
         cleaned_cookies = str(cookies_str or "").strip()
@@ -188,6 +197,31 @@ class ItemPublisher:
             f"原始错误: {raw_message}"
         )
 
+    @classmethod
+    def is_strong_verify_error(cls, payload: Dict[str, Any]) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        ret_values = payload.get("ret") or []
+        if not isinstance(ret_values, list):
+            ret_values = [ret_values]
+        return any(cls.STRONG_VERIFY_ERROR_CODE in str(item) for item in ret_values)
+
+    @classmethod
+    def build_strong_verify_error_message(
+        cls,
+        payload: Dict[str, Any],
+        account_id: str = "",
+    ) -> str:
+        raw_message = cls.extract_error_message(payload)
+        account_text = f"账号 {account_id} " if str(account_id or "").strip() else "当前闲鱼账号"
+        return (
+            f"{account_text}未通过闲鱼平台要求的实名认证或强身份校验，平台已拒绝发布。"
+            "请先在闲鱼 App 中使用该账号手动尝试发布一件商品，并按页面提示完成实名认证、"
+            "人脸验证或账号安全验证；认证完成后回到账号管理刷新 Cookie，再重新发布。"
+            "这是闲鱼服务端校验，程序无法代替或绕过。"
+            f"原始错误: {raw_message}"
+        )
+
     @staticmethod
     def _first_present_value(data: Dict[str, Any], *keys: str) -> Any:
         for key in keys:
@@ -199,23 +233,91 @@ class ItemPublisher:
     @classmethod
     def _normalize_category_result(cls, category_result: Dict[str, Any]) -> Dict[str, str]:
         return {
-            "catId": str(cls._first_present_value(category_result, "catId", "cat_id") or "").strip(),
-            "catName": str(cls._first_present_value(category_result, "catName", "cat_name") or "").strip(),
-            "channelCatId": str(cls._first_present_value(category_result, "channelCatId", "channel_cat_id") or "").strip(),
-            "tbCatId": str(cls._first_present_value(category_result, "tbCatId", "tb_cat_id") or "").strip(),
+            "catId": str(cls._first_present_value(
+                category_result, "catId", "cat_id", "categoryId", "category_id"
+            ) or "").strip(),
+            "catName": str(cls._first_present_value(
+                category_result, "catName", "cat_name", "channelCatName",
+                "channel_cat_name", "channelCateName", "channel_cate_name"
+            ) or "").strip(),
+            "channelCatId": str(cls._first_present_value(
+                category_result, "channelCatId", "channel_cat_id", "channelCateId", "channel_cate_id"
+            ) or "").strip(),
+            "tbCatId": str(cls._first_present_value(
+                category_result, "tbCatId", "tb_cat_id", "taobaoCategoryId", "taobao_category_id"
+            ) or "").strip(),
         }
 
     @classmethod
+    def _walk_category_objects(cls, value: Any):
+        if isinstance(value, str):
+            text = value.strip()
+            if text.startswith(("{", "[")):
+                try:
+                    value = json.loads(text)
+                except json.JSONDecodeError:
+                    return
+
+        if isinstance(value, dict):
+            yield value
+            for child in value.values():
+                yield from cls._walk_category_objects(child)
+        elif isinstance(value, list):
+            for child in value:
+                yield from cls._walk_category_objects(child)
+
+    @classmethod
+    def _extract_category_recommendation(cls, channel_res: Dict[str, Any]) -> Dict[str, str]:
+        if not isinstance(channel_res, dict):
+            return cls._normalize_category_result({})
+
+        candidates = []
+        data = channel_res.get("data")
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except json.JSONDecodeError:
+                data = {}
+
+        if isinstance(data, dict):
+            for key in ("categoryPredictResult", "category_predict_result", "itemCatDTO", "item_cat_dto"):
+                value = data.get(key)
+                if isinstance(value, dict):
+                    candidates.append(value)
+
+        for candidate in cls._walk_category_objects(data):
+            normalized = cls._normalize_category_result(candidate)
+            if any(normalized.values()):
+                is_clicked = cls._first_present_value(candidate, "isClicked", "is_clicked")
+                score = sum(bool(item) for item in normalized.values())
+                if str(is_clicked).lower() in {"1", "true"}:
+                    score += 2
+                candidates.append((score, candidate))
+
+        ranked_candidates = []
+        for candidate in candidates:
+            if isinstance(candidate, tuple):
+                ranked_candidates.append(candidate)
+            else:
+                normalized = cls._normalize_category_result(candidate)
+                ranked_candidates.append((10 + sum(bool(item) for item in normalized.values()), candidate))
+
+        for _, candidate in sorted(ranked_candidates, key=lambda item: item[0], reverse=True):
+            normalized = cls._normalize_category_result(candidate)
+            if all(normalized.values()):
+                return normalized
+
+        return cls._normalize_category_result({})
+
+    @classmethod
     def _validate_category_recommendation(cls, channel_res: Dict[str, Any]) -> Dict[str, str]:
-        data = channel_res.get("data") if isinstance(channel_res, dict) else None
-        category_result = cls._normalize_category_result(
-            data.get("categoryPredictResult", {}) if isinstance(data, dict) else {}
-        )
+        category_result = cls._extract_category_recommendation(channel_res)
         missing_fields = [field for field, value in category_result.items() if not value]
         if missing_fields:
-            raise ValueError(
+            raise CategoryRecommendationError(
                 "自动识别类目不完整，缺少字段: "
-                f"{', '.join(missing_fields)}。请调整商品标题、首图或填写类目提示后重试。"
+                f"{', '.join(missing_fields)}。系统已尝试直接识别和类目提示兜底，请填写更具体的类目提示后重试。",
+                debug_payload=cls._build_category_debug(channel_res),
             )
         return category_result
 
@@ -313,8 +415,31 @@ class ItemPublisher:
         if not self.is_success_response(channel_res):
             raise RuntimeError(f"获取发布类目失败: {self.extract_error_message(channel_res)}")
 
-        category_result = self._validate_category_recommendation(channel_res)
-        category_debug = self._build_category_debug(channel_res, category_hint=category_hint)
+        category_attempts = [self._build_category_debug(channel_res, category_hint=category_hint)]
+        try:
+            category_result = self._validate_category_recommendation(channel_res)
+        except CategoryRecommendationError:
+            fallback_res = await self.get_public_channel(
+                publish_title,
+                publish_desc,
+                uploaded_images,
+                category_hint=category_hint,
+                simplified=True,
+            )
+            category_attempts.append(self._build_category_debug(fallback_res, category_hint=category_hint))
+            if not self.is_success_response(fallback_res):
+                raise RuntimeError(f"获取发布类目失败: {self.extract_error_message(fallback_res)}")
+            try:
+                category_result = self._validate_category_recommendation(fallback_res)
+            except CategoryRecommendationError as exc:
+                exc.debug_payload = {"attempts": category_attempts}
+                raise
+            channel_res = fallback_res
+
+        category_debug = {
+            "selected": category_result,
+            "attempts": category_attempts,
+        }
 
         location = await self.get_default_location()
 
@@ -444,8 +569,14 @@ class ItemPublisher:
         description: str,
         images_info: List[Dict[str, Any]],
         category_hint: Optional[str] = None,
+        simplified: bool = False,
     ) -> Dict[str, Any]:
         recommend_title, recommend_description = self._build_recommend_text(title, description, category_hint)
+        if simplified:
+            clean_hint = str(category_hint or "").strip()
+            subject = clean_hint or str(title or "").strip()
+            recommend_title = f"{subject} 教程 资料 文档"[:120]
+            recommend_description = f"商品类目：{subject}。内容形式：数字资料、教程和文档。"[:5000]
         payload = {
             "title": recommend_title,
             "lockCpv": False,
