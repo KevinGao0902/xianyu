@@ -8664,7 +8664,7 @@ function renderCardsList(cards) {
     } else if (card.type === 'api') {
         dataCount = '∞';
     } else if (card.type === 'text') {
-        dataCount = '1';
+        dataCount = '<span class="badge bg-success">无限</span>';
     } else if (card.type === 'image') {
         dataCount = '1';
     }
